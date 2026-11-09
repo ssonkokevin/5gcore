@@ -1,0 +1,81 @@
+# DRA Runtime Configuration (mirrors dra.json from stp/net/srg/config)
+{
+  "origin_host": "dra.core.local",
+  "origin_realm": "core.local",
+  "product_name": "SRG-DRA",
+  "vendor_id": 10415,
+  "port": 3868,
+  "realm": "core.local",
+  "db": {
+    "host": "db",
+    "port": 3306,
+    "user": "net5gc",
+    "password": "net5gc",
+    "database": "srg_db"
+  },
+  "redis": {
+    "host": "redis",
+    "port": 6379,
+    "password": "123456"
+  },
+  "peers": [
+    {
+      "name": "udm",
+      "host": "udm",
+      "port": 3868,
+      "realm": "core.local",
+      "protocol": "diameter"
+    },
+    {
+      "name": "scp",
+      "host": "scp",
+      "port": 3868,
+      "realm": "core.local",
+      "protocol": "diameter"
+    },
+    {
+      "name": "stp",
+      "host": "stp",
+      "port": 2905,
+      "realm": "core.local",
+      "protocol": "sigtran"
+    }
+  ],
+  "routes": [
+    {
+      "destination_realm": "core.local",
+      "application_id": 16777216,
+      "command_code": 272,
+      "peer": "udm",
+      "action": "route"
+    },
+    {
+      "destination_realm": "core.local",
+      "application_id": 16777216,
+      "command_code": 272,
+      "peer": "scp",
+      "action": "proxy"
+    },
+    {
+      "destination_realm": "core.local",
+      "application_id": 16777216,
+      "command_code": 272,
+      "peer": "stp",
+      "action": "translate"
+    }
+  ],
+  "translation": {
+    "m3ua_to_diameter": {
+      "si": 3,
+      "ssn": 8,
+      "target_application": "16777216"
+    },
+    "diameter_to_m3ua": {
+      "application_id": 16777216,
+      "command_code": 272,
+      "target_si": 3,
+      "target_ssn": 8
+    }
+  },
+  "log_level": "INFO"
+}
