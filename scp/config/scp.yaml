@@ -1,0 +1,10 @@
+scp:
+  origin_host: "scp.core.local"
+  origin_realm: "core.local"
+  port: 3868
+  camel_port: 2905
+  dra_host: "open5gs-dra"
+  dra_port: 3868
+  redis_host: "redis"
+  redis_port: 6379
+  log_level: "info"

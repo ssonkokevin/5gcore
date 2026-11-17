@@ -129,10 +129,16 @@ services:
       - DB_URI=mongodb://mongo:27017
     ports:
       - "8000:8000/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/nnrf-nfm/v1/nf-instances"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - core-net
     depends_on:
-      - mongo
+      mongo:
+        condition: service_healthy
 
   mongo:
     image: mongo:6
@@ -140,6 +146,13 @@ services:
     restart: unless-stopped
     volumes:
       - core-mongo-data:/data/db
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - core-net
 
@@ -167,12 +180,18 @@ services:
       - N2_INTERFACE_GNB_ADDR=gnb
       - N2_INTERFACE_GNB_PORT=38412
     ports:
-      - "80:80/tcp"
+      - "8080:80/tcp"
       - "38412:38412/sctp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - core-net
     depends_on:
-      - nrf
+      nrf:
+        condition: service_healthy
 
   smf:
     image: free5gc/smf:v3.4.0
@@ -189,13 +208,20 @@ services:
       - DNS_SECONDARY=8.8.4.4
       - SUBNET_POOL=10.60.0.0/16
     ports:
+      - "8081:80/tcp"
       - "8805:8805/udp"
-      - "80:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - core-net
     depends_on:
-      - nrf
-      - upf
+      nrf:
+        condition: service_healthy
+      upf:
+        condition: service_started
 
   upf:
     image: free5gc/upf:v3.4.0
@@ -214,10 +240,16 @@ services:
       - "2152:2152/udp"
       - "8805:8805/udp"
       - "42050:42050/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8805"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - core-net
     depends_on:
-      - smf
+      smf:
+        condition: service_started
 
   ausf:
     image: free5gc/ausf:v3.4.0
@@ -229,15 +261,21 @@ services:
       - NRF_ADDR=nrf
       - NRF_PORT=8000
     ports:
-      - "80:80/tcp"
+      - "8082:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - core-net
     depends_on:
-      - nrf
+      nrf:
+        condition: service_healthy
 
   udm:
     image: free5gc/udm:v3.4.0
-    container_name: core-udm
+    container_name: core-udm-free5gc
     restart: unless-stopped
     environment:
       - UDM_ADDR=udm
@@ -246,16 +284,23 @@ services:
       - NRF_PORT=8000
       - DB_URI=mongodb://mongo:27017
     ports:
-      - "80:80/tcp"
+      - "8083:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - core-net
     depends_on:
-      - nrf
-      - mongo
+      nrf:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
 
   pcf:
     image: free5gc/pcf:v3.4.0
-    container_name: core-pcf
+    container_name: core-pcf-free5gc
     restart: unless-stopped
     environment:
       - PCF_ADDR=pcf
@@ -263,11 +308,17 @@ services:
       - NRF_ADDR=nrf
       - NRF_PORT=8000
     ports:
-      - "80:80/tcp"
+      - "8084:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - core-net
     depends_on:
-      - nrf
+      nrf:
+        condition: service_healthy
 
   chf:
     image: free5gc/chf:v3.4.0
@@ -279,11 +330,17 @@ services:
       - NRF_ADDR=nrf
       - NRF_PORT=8000
     ports:
-      - "80:80/tcp"
+      - "8085:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - core-net
     depends_on:
-      - nrf
+      nrf:
+        condition: service_healthy
 
   # ========================================================================
   # SCP / Legacy SS7 Control Plane
@@ -315,6 +372,7 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./scp/src:/app/src
+      - ./scp/config:/app/config:ro
     ports:
       - "3869:3868/tcp"
       - "2906:2905/sctp"
