@@ -1,0 +1,16 @@
+{
+  "dpe_group": "dpeGroup1",
+  "dpe_accelerate": [0, 1],
+  "dpe_num": 1,
+  "bind_cores": 1,
+  "start_id": 1,
+  "interfaces": [
+    {"name": "N3", "type": "gtpu", "ip": "0.0.0.0", "port": 2152},
+    {"name": "N4", "type": "pfcp", "ip": "0.0.0.0", "port": 8805},
+    {"name": "N6", "type": "egress", "ip": "0.0.0.0"}
+  ],
+  "up_function_features": ["DDND", "EMPU", "FRRT", "TRACE"],
+  "rx_ring": 65536,
+  "tx_ring": 65536,
+  "mem_pool": 131072
+}

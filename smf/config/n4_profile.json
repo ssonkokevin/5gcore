@@ -1,0 +1,19 @@
+{
+  "pfcp": {
+    "node_id": "smf.core.local",
+    "listen_ip": "0.0.0.0",
+    "listen_port": 8805,
+    "heartbeat_interval": 30,
+    "retransmit_timeout": 5,
+    "max_retransmit": 3
+  },
+  "upf": [
+    {
+      "name": "upf01",
+      "node_id": "upf.core.local",
+      "ip": "upf",
+      "port": 8805,
+      "capabilities": ["DPMGR", "CPE", "LI"]
+    }
+  ]
+}

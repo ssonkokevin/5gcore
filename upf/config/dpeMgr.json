@@ -1,0 +1,8 @@
+{
+  "mgmt_port": 42050,
+  "dpe_process": "/opt/net/firmware/active/upf/bin/upfDpeProcess",
+  "dpdkproc_process": "/opt/net/firmware/active/dpdkproc/bin/dpdkproc",
+  "node_addr": "127.0.0.1",
+  "n6_kni_switch": false,
+  "container_deployment": true
+}

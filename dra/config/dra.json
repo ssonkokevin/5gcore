@@ -1,81 +1,164 @@
-# DRA Runtime Configuration (mirrors dra.json from stp/net/srg/config)
 {
-  "origin_host": "dra.core.local",
-  "origin_realm": "core.local",
-  "product_name": "SRG-DRA",
-  "vendor_id": 10415,
-  "port": 3868,
-  "realm": "core.local",
-  "db": {
-    "host": "db",
-    "port": 3306,
-    "user": "net5gc",
-    "password": "net5gc",
-    "database": "srg_db"
-  },
-  "redis": {
-    "host": "redis",
-    "port": 6379,
-    "password": "123456"
-  },
-  "peers": [
+  "local": [
     {
+      "ip": "0.0.0.0",
+      "port": 3868,
+      "realm": "core.local",
+      "host": "dra.core.local",
+      "name": "dra_local_1",
+      "AppID": [16777216, 16777238, 16777265, 16777302],
+      "protocol": "sctp",
+      "vendorID": 10415,
+      "productName": "Open5GS-DRA"
+    }
+  ],
+  "peer": [
+    {
+      "ip": "",
+      "peer_id": 1,
+      "peer_set": "core_peers",
       "name": "udm",
-      "host": "udm",
-      "port": 3868,
-      "realm": "core.local",
-      "protocol": "diameter"
+      "AppID": [16777216, 16777238, 16777265],
+      "group": "",
+      "local_ip": "0.0.0.0",
+      "local_port": 3868,
+      "remote_ip": "udm",
+      "remote_port": 3868,
+      "remote_type": "server",
+      "local_host": "dra.core.local",
+      "local_realm": "core.local",
+      "remote_host": "udm.core.local",
+      "remote_realm": "core.local",
+      "protocol": "sctp",
+      "vendorID": 10415,
+      "productName": "free5GC-UDM",
+      "enable": true,
+      "priority": 1,
+      "watchdog_interval": 5,
+      "retransmit_timer": 10,
+      "max_retransmit": 3
     },
     {
+      "ip": "",
+      "peer_id": 2,
+      "peer_set": "core_peers",
       "name": "scp",
-      "host": "scp",
-      "port": 3868,
-      "realm": "core.local",
-      "protocol": "diameter"
+      "AppID": [16777216, 16777238, 16777265],
+      "group": "",
+      "local_ip": "0.0.0.0",
+      "local_port": 3868,
+      "remote_ip": "scp",
+      "remote_port": 3868,
+      "remote_type": "server",
+      "local_host": "dra.core.local",
+      "local_realm": "core.local",
+      "remote_host": "scp.core.local",
+      "remote_realm": "core.local",
+      "protocol": "sctp",
+      "vendorID": 10415,
+      "productName": "SCP",
+      "enable": true,
+      "priority": 2,
+      "watchdog_interval": 5,
+      "retransmit_timer": 10,
+      "max_retransmit": 3
     },
     {
-      "name": "stp",
-      "host": "stp",
-      "port": 2905,
-      "realm": "core.local",
-      "protocol": "sigtran"
+      "ip": "",
+      "peer_id": 3,
+      "peer_set": "core_peers",
+      "name": "osmo-stp",
+      "AppID": [16777216, 16777238],
+      "group": "",
+      "local_ip": "0.0.0.0",
+      "local_port": 3868,
+      "remote_ip": "osmo-stp",
+      "remote_port": 2905,
+      "remote_type": "server",
+      "local_host": "dra.core.local",
+      "local_realm": "core.local",
+      "remote_host": "stp.core.local",
+      "remote_realm": "core.local",
+      "protocol": "sctp",
+      "vendorID": 10415,
+      "productName": "osmo-stp",
+      "enable": true,
+      "priority": 3,
+      "watchdog_interval": 5,
+      "retransmit_timer": 10,
+      "max_retransmit": 3
+    },
+    {
+      "ip": "",
+      "peer_id": 4,
+      "peer_set": "core_peers",
+      "name": "hss",
+      "AppID": [16777216, 16777238, 16777265, 16777302],
+      "group": "",
+      "local_ip": "0.0.0.0",
+      "local_port": 3868,
+      "remote_ip": "hss",
+      "remote_port": 3868,
+      "remote_type": "server",
+      "local_host": "dra.core.local",
+      "local_realm": "core.local",
+      "remote_host": "hss.core.local",
+      "remote_realm": "core.local",
+      "protocol": "sctp",
+      "vendorID": 10415,
+      "productName": "Open5GS-HSS",
+      "enable": true,
+      "priority": 1,
+      "watchdog_interval": 5,
+      "retransmit_timer": 10,
+      "max_retransmit": 3
     }
   ],
-  "routes": [
+  "peer_set": [
     {
-      "destination_realm": "core.local",
-      "application_id": 16777216,
-      "command_code": 272,
-      "peer": "udm",
-      "action": "route"
-    },
-    {
-      "destination_realm": "core.local",
-      "application_id": 16777216,
-      "command_code": 272,
-      "peer": "scp",
-      "action": "proxy"
-    },
-    {
-      "destination_realm": "core.local",
-      "application_id": 16777216,
-      "command_code": 272,
-      "peer": "stp",
-      "action": "translate"
+      "peer_set_name": "core_peers",
+      "mode": "redundancy"
     }
   ],
-  "translation": {
-    "m3ua_to_diameter": {
-      "si": 3,
-      "ssn": 8,
-      "target_application": "16777216"
+  "route": [
+    {
+      "name": "dra_route_udm",
+      "route_id": 1,
+      "origin_peer_set": "core_peers",
+      "dest_peer_set": "core_peers",
+      "imsi": "00101*",
+      "msisdn": "",
+      "impu": "",
+      "impi": "",
+      "origin_realm": "",
+      "origin_host": "",
+      "destination_host": "",
+      "destination_realm": "",
+      "priority": 1,
+      "application_id": "16777216"
     },
-    "diameter_to_m3ua": {
-      "application_id": 16777216,
-      "command_code": 272,
-      "target_si": 3,
-      "target_ssn": 8
+    {
+      "name": "dra_route_hss",
+      "route_id": 2,
+      "origin_peer_set": "core_peers",
+      "dest_peer_set": "core_peers",
+      "imsi": "00101*",
+      "msisdn": "",
+      "impu": "",
+      "impi": "",
+      "origin_realm": "",
+      "origin_host": "",
+      "destination_host": "",
+      "destination_realm": "",
+      "priority": 1,
+      "application_id": "16777238"
     }
-  },
-  "log_level": "INFO"
+  ],
+  "translate": null,
+  "cmm_cfg": {
+    "log_level": "info",
+    "log_file": "/var/log/srg/dra.log",
+    "configLocal": 0,
+    "profile_listen": "41100"
+  }
 }

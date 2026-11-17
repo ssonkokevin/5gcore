@@ -1,0 +1,31 @@
+upf:
+  host: 0.0.0.0
+  realm: core.local
+  nrf_addr: http://nrf:7777
+  plmn:
+    mcc: "001"
+    mnc: "01"
+  n3:
+    gtpu_addr: 0.0.0.0
+    gtpu_port: 2152
+  n4:
+    pfcp_addr: 0.0.0.0
+    pfcp_port: 8805
+  n6:
+    egress_addr: 0.0.0.0
+  session:
+    subnet: 10.45.0.0/16
+    gateway: 10.45.0.1
+  datapath:
+    mode: single_pass
+    dpdk_enabled: false
+    max_session: 5000
+    max_thread_num: 3
+    max_queue_size: 8192
+  cgnat:
+    enabled: false
+  dpi:
+    enabled: false
+    mode: sidecar
+  rating_groups:
+    enabled: false

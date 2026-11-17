@@ -1,0 +1,30 @@
+{
+  "rules": [
+    {
+      "rule_id": "rule_internet",
+      "qci": 9,
+      "arp": 8,
+      "ambr_ul": 120000000,
+      "ambr_dl": 120000000,
+      "charging_key": 1,
+      "rating_group": "basic",
+      "flow_descriptors": [
+        {"ip_proto": 6, "dst_port": 80},
+        {"ip_proto": 6, "dst_port": 443}
+      ]
+    },
+    {
+      "rule_id": "rule_video",
+      "qci": 5,
+      "arp": 5,
+      "ambr_ul": 10000000,
+      "ambr_dl": 50000000,
+      "charging_key": 2,
+      "rating_group": "premium",
+      "flow_descriptors": [
+        {"app_id": "youtube"},
+        {"app_id": "netflix"}
+      ]
+    }
+  ]
+}

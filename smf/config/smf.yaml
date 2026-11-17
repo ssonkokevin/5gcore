@@ -1,0 +1,23 @@
+smf:
+  host: 0.0.0.0
+  port: 7777
+  realm: core.local
+  nrf_addr: http://nrf:7777
+  plmn:
+    mcc: "001"
+    mnc: "01"
+  snssai:
+    - sst: 1
+      sd: "000001"
+  dnn: internet
+  session:
+    subnet: 10.45.0.0/16
+    gateway: 10.45.0.1
+    dns: 8.8.8.8,8.8.4.4
+  n4:
+    pfcp_server: 0.0.0.0
+    pfcp_client_upf: upf
+    pfcp_port: 8805
+  n2:
+    amf_addr: amf
+  serving_area: [site-a]

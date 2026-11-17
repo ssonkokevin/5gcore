@@ -1,0 +1,26 @@
+pcf:
+  host: 0.0.0.0
+  port: 7777
+  realm: core.local
+  origin_host: pcf.core.local
+  nrf_addr: http://nrf:7777
+  sbi_tls: false
+  plmn:
+    mcc: "001"
+    mnc: "01"
+  snssai:
+    - sst: 1
+      sd: "000001"
+  dnn: [internet]
+pcrf:
+  gx_port: 3868
+  gy_port: 3869
+  realm: core.local
+  origin_host: pcf.core.local
+  vendor_id: 10415
+  product_name: SRG-PCRF
+  db_uri: mysql://net5gc:net5gc@db:3306/PCRFDB
+pcc:
+  rules_file: /app/config/pcc_rules.json
+  default_qci: 9
+  default_arp: 8
