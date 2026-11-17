@@ -1,29 +1,62 @@
 """
 OAM Core Views - REST API for 5G Core Network Management
+Full 3GPP Rel-15 to Rel-20 Support
 """
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.parsers import MultiPartParser, FormParser
 from .models import (
+    # DRA
     DRALocal, DRAPeerSet, DRAPeer, DRARoute, DRATranslate,
+    # STP
     M3UAGlobal, M3UALocal, M3UALinkset, M3UALink,
     STPRoute, STPTranslate,
-    Subscriber, AuthVector, Roaming, ServiceProfile,
-    BatchUpload, IMSIRange
+    # Reference
+    MCCMNC, PLMNProfile,
+    # Subscriber
+    Subscriber, AuthVector,
+    # Subscriptions
+    EPSSubscription, FiveGSubscription, IMSSubscription,
+    # Profiles
+    APNProfile, SupplementaryService, RoamingProfile,
+    # Routing
+    USSDRoute, CamelServiceProfile,
+    # Network
+    NetworkNode,
+    # Batch
+    BatchUpload, IMSIRange,
 )
 from .serializers import (
+    # DRA
     DRALocalSerializer, DRAPeerSetSerializer, DRAPeerSerializer,
     DRARouteSerializer, DRATranslateSerializer,
+    # STP
     M3UAGlobalSerializer, M3UALocalSerializer, M3UALinksetSerializer, M3UALinkSerializer,
     STPRouteSerializer, STPTranslateSerializer,
+    # Reference
+    MCCMNCSerializer, PLMNProfileSerializer,
+    # Subscriber
     SubscriberSerializer, SubscriberCreateSerializer, SubscriberUpdateSerializer,
-    AuthVectorSerializer, RoamingSerializer, ServiceProfileSerializer,
-    BatchUploadSerializer, IMSIRangeSerializer, IMSIRangeCreateSerializer
+    AuthVectorSerializer,
+    # Subscriptions
+    EPSSubscriptionSerializer, FiveGSubscriptionSerializer, IMSSubscriptionSerializer,
+    # Profiles
+    APNProfileSerializer, SupplementaryServiceSerializer, RoamingProfileSerializer,
+    # Routing
+    USSDRouteSerializer, CamelServiceProfileSerializer,
+    # Network
+    NetworkNodeSerializer,
+    # Batch
+    BatchUploadSerializer, IMSIRangeSerializer, IMSIRangeCreateSerializer,
+    # Full Profile
+    FullProfileSerializer,
 )
 
 
+# ============================================================================
 # DRA Management Views
+# ============================================================================
 class DRALocalListView(APIView):
     def get(self, request):
         queryset = DRALocal.objects.all()
@@ -59,7 +92,9 @@ class DRATranslateListView(APIView):
         return Response(serializer.data)
 
 
+# ============================================================================
 # STP/M3UA Management Views
+# ============================================================================
 class M3UAGlobalView(APIView):
     def get(self, request):
         queryset = M3UAGlobal.objects.all()
@@ -102,7 +137,40 @@ class STPTranslateListView(APIView):
         return Response(serializer.data)
 
 
+# ============================================================================
+# Reference Data Views (MCC/MNC/PLMN)
+# ============================================================================
+class MCCMNCListView(APIView):
+    def get(self, request):
+        queryset = MCCMNC.objects.filter(is_active=True)
+        serializer = MCCMNCSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = MCCMNCSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class PLMNProfileListView(APIView):
+    def get(self, request):
+        queryset = PLMNProfile.objects.all()
+        serializer = PLMNProfileSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+    def post(self, request):
+        serializer = PLMNProfileSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+# ============================================================================
 # UDM Subscriber Management Views
+# ============================================================================
 class SubscriberListView(APIView):
     def get(self, request):
         queryset = Subscriber.objects.all()[:100]
@@ -146,40 +214,296 @@ class SubscriberDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class SubscriberFullProfileView(APIView):
+    """Get complete subscriber profile across all tables"""
+    def get(self, request, imsi):
+        import requests
+        try:
+            resp = requests.get(f"http://custom-udm:8080/subscribers/{imsi}/full-profile", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
 class SubscriberAuthVectorView(APIView):
     def get(self, request, imsi):
+        import requests
+        rand = request.GET.get("rand")
+        algorithm = request.GET.get("algorithm", "milenage")
         try:
-            subscriber = Subscriber.objects.get(imsi=imsi)
-        except Subscriber.DoesNotExist:
-            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        # Return pre-computed auth vector if available
-        try:
-            av = AuthVector.objects.get(imsi=subscriber)
-            serializer = AuthVectorSerializer(av)
-            return Response(serializer.data)
-        except AuthVector.DoesNotExist:
-            # Generate stub
-            return Response({
-                "imsi": imsi,
-                "rand": request.GET.get("rand", "00" * 16),
-                "autn": "00" * 32,
-                "res": "00" * 8,
-                "xres": "00" * 32,
-                "ck": "00" * 32,
-                "ik": "00" * 32,
-                "k_asme": "00" * 32,
-                "k_seaf": "00" * 32,
-                "k_ausf": "00" * 32,
-            })
+            url = f"http://custom-udm:8080/subscribers/{imsi}/auth-vector"
+            params = {}
+            if rand:
+                params["rand"] = rand
+            if algorithm:
+                params["algorithm"] = algorithm
+            resp = requests.get(url, params=params, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
+class SubscriberGenerateAuthVectorView(APIView):
+    def post(self, request, imsi):
+        import requests
+        try:
+            resp = requests.post(f"http://custom-udm:8080/subscribers/{imsi}/auth-vector/generate", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+# ============================================================================
+# Subscription Views (EPS, 5G, IMS)
+# ============================================================================
+class EPSSubscriptionView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            resp = requests.get(f"http://custom-udm:8080/subscribers/{imsi}/eps-subscription", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def put(self, request, imsi):
+        import requests
+        try:
+            resp = requests.put(f"http://custom-udm:8080/subscribers/{imsi}/eps-subscription", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class FiveGSubscriptionView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            resp = requests.get(f"http://custom-udm:8080/subscribers/{imsi}/5g-subscription", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def put(self, request, imsi):
+        import requests
+        try:
+            resp = requests.put(f"http://custom-udm:8080/subscribers/{imsi}/5g-subscription", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class IMSSubscriptionView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            resp = requests.get(f"http://custom-udm:8080/subscribers/{imsi}/ims-subscription", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def put(self, request, imsi):
+        import requests
+        try:
+            resp = requests.put(f"http://custom-udm:8080/subscribers/{imsi}/ims-subscription", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+# ============================================================================
+# APN/DNN Profile Views
+# ============================================================================
+class APNProfileListView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            resp = requests.get(f"http://custom-udm:8080/subscribers/{imsi}/apn-profiles", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def post(self, request, imsi):
+        import requests
+        try:
+            resp = requests.post(f"http://custom-udm:8080/subscribers/{imsi}/apn-profiles", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class APNProfileDetailView(APIView):
+    def put(self, request, imsi, apn):
+        import requests
+        try:
+            resp = requests.put(f"http://custom-udm:8080/subscribers/{imsi}/apn-profiles/{apn}", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def delete(self, request, imsi, apn):
+        import requests
+        try:
+            resp = requests.delete(f"http://custom-udm:8080/subscribers/{imsi}/apn-profiles/{apn}", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+# ============================================================================
+# Supplementary Service Views
+# ============================================================================
+class SupplementaryServiceListView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            resp = requests.get(f"http://custom-udm:8080/subscribers/{imsi}/supplementary-services", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def post(self, request, imsi):
+        import requests
+        try:
+            resp = requests.post(f"http://custom-udm:8080/subscribers/{imsi}/supplementary-services", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class SupplementaryServiceDetailView(APIView):
+    def put(self, request, imsi, service_code):
+        import requests
+        try:
+            resp = requests.put(f"http://custom-udm:8080/subscribers/{imsi}/supplementary-services/{service_code}", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def delete(self, request, imsi, service_code):
+        import requests
+        try:
+            resp = requests.delete(f"http://custom-udm:8080/subscribers/{imsi}/supplementary-services/{service_code}", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+# ============================================================================
+# Roaming Profile Views
+# ============================================================================
+class RoamingProfileListView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            resp = requests.get(f"http://custom-udm:8080/subscribers/{imsi}/roaming-profiles", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def post(self, request, imsi):
+        import requests
+        try:
+            resp = requests.post(f"http://custom-udm:8080/subscribers/{imsi}/roaming-profiles", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class RoamingProfileDetailView(APIView):
+    def put(self, request, imsi, visited_plmn):
+        import requests
+        try:
+            resp = requests.put(f"http://custom-udm:8080/subscribers/{imsi}/roaming-profiles/{visited_plmn}", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def delete(self, request, imsi, visited_plmn):
+        import requests
+        try:
+            resp = requests.delete(f"http://custom-udm:8080/subscribers/{imsi}/roaming-profiles/{visited_plmn}", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+# ============================================================================
+# USSD Routing Views
+# ============================================================================
+class USSDRouteListView(APIView):
+    def get(self, request):
+        import requests
+        try:
+            resp = requests.get("http://custom-udm:8080/ussd-routes", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def post(self, request):
+        import requests
+        try:
+            resp = requests.post("http://custom-udm:8080/ussd-routes", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+# ============================================================================
+# CAMEL Profile Views
+# ============================================================================
+class CamelServiceProfileListView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            resp = requests.get(f"http://custom-udm:8080/subscribers/{imsi}/camel-profiles", timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def post(self, request, imsi):
+        import requests
+        try:
+            resp = requests.post(f"http://custom-udm:8080/subscribers/{imsi}/camel-profiles", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+# ============================================================================
+# Network Node Views
+# ============================================================================
+class NetworkNodeListView(APIView):
+    def get(self, request):
+        import requests
+        try:
+            params = {}
+            if request.GET.get("node_type"):
+                params["node_type"] = request.GET.get("node_type")
+            if request.GET.get("plmn_id"):
+                params["plmn_id"] = request.GET.get("plmn_id")
+            resp = requests.get("http://custom-udm:8080/network-nodes", params=params, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+    def post(self, request):
+        import requests
+        try:
+            resp = requests.post("http://custom-udm:8080/network-nodes", json=request.data, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+# ============================================================================
 # Batch Upload Views
+# ============================================================================
 class BatchUploadView(APIView):
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
         """Upload CSV/JSON file for batch subscriber provisioning.
-        
+
         Form fields:
         - file: CSV/JSON file
         - batch_id: Optional batch identifier
@@ -193,11 +517,10 @@ class BatchUploadView(APIView):
         file_obj = request.FILES.get('file')
         if not file_obj:
             return Response({"error": "No file provided"}, status=status.HTTP_400_BAD_REQUEST)
-        
-        # Proxy to UDM service
+
         import requests
         try:
-            udm_url = "http://udm:8080/subscribers/batch"
+            udm_url = "http://custom-udm:8080/subscribers/batch"
             files = {'file': (file_obj.name, file_obj.read(), file_obj.content_type)}
             data = {
                 'batch_id': request.data.get('batch_id', ''),
@@ -218,18 +541,20 @@ class BatchStatusView(APIView):
     def get(self, request, batch_id):
         import requests
         try:
-            resp = requests.get(f"http://udm:8080/batches/{batch_id}", timeout=10)
+            resp = requests.get(f"http://custom-udm:8080/batches/{batch_id}", timeout=10)
             return Response(resp.json(), status=resp.status_code)
         except requests.RequestException as e:
             return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
+# ============================================================================
 # IMSI Range Views
+# ============================================================================
 class IMSIRangeListView(APIView):
     def get(self, request):
         import requests
         try:
-            resp = requests.get("http://udm:8080/imsi-ranges/", timeout=10)
+            resp = requests.get("http://custom-udm:8080/imsi-ranges/", timeout=10)
             return Response(resp.json(), status=resp.status_code)
         except requests.RequestException as e:
             return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -237,7 +562,7 @@ class IMSIRangeListView(APIView):
     def post(self, request):
         import requests
         try:
-            resp = requests.post("http://udm:8080/imsi-ranges/", json=request.data, timeout=10)
+            resp = requests.post("http://custom-udm:8080/imsi-ranges/", json=request.data, timeout=10)
             return Response(resp.json(), status=resp.status_code)
         except requests.RequestException as e:
             return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -247,25 +572,90 @@ class IMSIAllocateView(APIView):
     def post(self, request):
         import requests
         try:
-            resp = requests.post("http://udm:8080/imsi-ranges/allocate", json=request.data, timeout=30)
+            resp = requests.post("http://custom-udm:8080/imsi-ranges/allocate", json=request.data, timeout=30)
             return Response(resp.json(), status=resp.status_code)
         except requests.RequestException as e:
             return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
 
-# Roaming & Service Profile Views
-class RoamingListView(APIView):
+# ============================================================================
+# Nudm_SDM Proxy Views (TS 29.503)
+# ============================================================================
+class NudmAMDataView(APIView):
     def get(self, request, imsi):
-        queryset = Roaming.objects.filter(imsi=imsi)
-        serializer = RoamingSerializer(queryset, many=True)
-        return Response(serializer.data)
-
-
-class ServiceProfileView(APIView):
-    def get(self, request, imsi):
+        import requests
         try:
-            profile = ServiceProfile.objects.get(imsi=imsi)
-        except ServiceProfile.DoesNotExist:
-            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
-        serializer = ServiceProfileSerializer(profile)
-        return Response(serializer.data)
+            params = {}
+            if request.GET.get("supported_features"):
+                params["supported_features"] = request.GET.get("supported_features")
+            resp = requests.get(f"http://custom-udm:8080/nudm-sdm/v2/{imsi}/am-data", params=params, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class NudmSmfSelectDataView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            params = {}
+            if request.GET.get("supported_features"):
+                params["supported_features"] = request.GET.get("supported_features")
+            resp = requests.get(f"http://custom-udm:8080/nudm-sdm/v2/{imsi}/smf-select-data", params=params, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class NudmUeCmDataView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            params = {}
+            if request.GET.get("supported_features"):
+                params["supported_features"] = request.GET.get("supported_features")
+            resp = requests.get(f"http://custom-udm:8080/nudm-sdm/v2/{imsi}/ue-cm-data", params=params, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class NudmSmDataView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            params = {}
+            if request.GET.get("supported_features"):
+                params["supported_features"] = request.GET.get("supported_features")
+            if request.GET.get("dnn"):
+                params["dnn"] = request.GET.get("dnn")
+            resp = requests.get(f"http://custom-udm:8080/nudm-sdm/v2/{imsi}/sm-data", params=params, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class NudmTraceDataView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            params = {}
+            if request.GET.get("supported_features"):
+                params["supported_features"] = request.GET.get("supported_features")
+            resp = requests.get(f"http://custom-udm:8080/nudm-sdm/v2/{imsi}/trace-data", params=params, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+class NudmSmsDataView(APIView):
+    def get(self, request, imsi):
+        import requests
+        try:
+            params = {}
+            if request.GET.get("supported_features"):
+                params["supported_features"] = request.GET.get("supported_features")
+            resp = requests.get(f"http://custom-udm:8080/nudm-sdm/v2/{imsi}/sms-data", params=params, timeout=10)
+            return Response(resp.json(), status=resp.status_code)
+        except requests.RequestException as e:
+            return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)

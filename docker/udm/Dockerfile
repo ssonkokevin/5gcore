@@ -11,7 +11,8 @@ RUN pip install --no-cache-dir \
     redis==5.0.1 \
     aiofiles==23.2.1 \
     python-dotenv==1.0.0 \
-    requests==2.31.0
+    requests==2.31.0 \
+    pycryptodome==3.19.0
 
 COPY ./udm/src/ /app/src/
 COPY ./udm/config/ /app/config/

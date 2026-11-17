@@ -343,6 +343,7 @@ services:
       - REDIS_PORT=${REDIS_PORT}
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      - OPERATOR_KEY=${OPERATOR_KEY:-00000000000000000000000000000000}
     volumes:
       - ./udm/src:/app/src
     ports:
@@ -577,6 +578,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      hssdb:
+        condition: service_healthy
       redis:
         condition: service_healthy
     environment:
@@ -586,11 +589,18 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
+      - HSS_DB_HOST=hssdb
+      - HSS_DB_PORT=3306
+      - HSS_DB_USER=hss
+      - HSS_DB_PASSWORD=${HSS_DB_PASSWORD}
+      - HSS_DB_NAME=hssdb
       - REDIS_HOST=${REDIS_HOST}
       - REDIS_PORT=${REDIS_PORT}
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - OAM_USER=${OAM_USER}
       - OAM_PASSWORD=${OAM_PASSWORD}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DJANGO_DEBUG=True
     volumes:
       - ./oam:/app:ro
     ports:

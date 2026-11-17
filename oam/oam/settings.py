@@ -1,5 +1,6 @@
 """
 Django settings for OAM project.
+Multi-database support: srg_db (STP/DRA) and hssdb (UDM/HSS)
 """
 import os
 from pathlib import Path
@@ -34,8 +35,19 @@ DATABASES = {
         "HOST": os.getenv("DB_HOST", "db"),
         "PORT": os.getenv("DB_PORT", "3306"),
         "OPTIONS": {"charset": "utf8mb4"},
-    }
+    },
+    "hssdb": {
+        "ENGINE": "django.db.backends.mysql",
+        "NAME": os.getenv("HSS_DB_NAME", "hssdb"),
+        "USER": os.getenv("HSS_DB_USER", "hss"),
+        "PASSWORD": os.getenv("HSS_DB_PASSWORD", "hss123"),
+        "HOST": os.getenv("HSS_DB_HOST", "hssdb"),
+        "PORT": os.getenv("HSS_DB_PORT", "3306"),
+        "OPTIONS": {"charset": "utf8mb4"},
+    },
 }
+
+DATABASE_ROUTERS = ["oam.core.routers.DatabaseRouter"]
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
