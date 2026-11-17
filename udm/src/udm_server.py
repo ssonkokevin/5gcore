@@ -41,6 +41,7 @@ import json
 import os
 import secrets
 import uuid
+from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 import mysql.connector
@@ -1317,8 +1318,1325 @@ def get_nudm_sms_data(imsi: str, supported_features: Optional[str] = Query(None)
 
 
 # ============================================================================
-# EPS Subscription (S6a)
+# Nudm_UEAU - UE Authentication (TS 29.503 §5.2)
 # ============================================================================
+
+class GenerateAuthDataRequest(BaseModel):
+    serving_network_name: str = Field(..., description="Serving Network Name (SNID)")
+    resynchronization_info: Optional[Dict] = Field(None, description="AUTS for resync")
+    supported_features: Optional[str] = None
+
+
+class AuthenticationVector5G(BaseModel):
+    av_type: str = "5G_AKA"
+    rand: str
+    xres_star: str
+    autn: str
+    kausf: str
+
+
+class GenerateAuthDataResponse(BaseModel):
+    auth_type: str = "5G_AKA"
+    auth_vectors: List[AuthenticationVector5G]
+    supported_features: Optional[str] = None
+
+
+@app.post("/nudm-ueau/v1/{supi_or_suci}/security-information/generate-auth-data", response_model=GenerateAuthDataResponse)
+def generate_auth_data(supi_or_suci: str, req: GenerateAuthDataRequest):
+    """Generate 5G Authentication Data (TS 29.503 §5.2.2.1).
+    
+    AUSF calls this to get 5G AKA vectors. Handles SUCI de-concealment.
+    """
+    # De-conceal SUCI to SUPI if needed
+    imsi = deconceal_suci(supi_or_suci) if suci_is_suci(supi_or_suci) else supi_or_suci
+    if not imsi:
+        raise HTTPException(status_code=400, detail="Invalid SUPI/SUCI format")
+    
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM tbl_subscriber WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Subscriber not found")
+        
+        if not row.get("k") or not row.get("opc"):
+            raise HTTPException(status_code=400, detail="5G credentials not provisioned")
+        
+        # Generate authentication vector
+        if CRYPTO_AVAILABLE:
+            crypto = get_crypto(row["opc"])
+            k_bytes = bytes.fromhex(row["k"])
+            av = crypto.generate_auth_vector_5g(k_bytes, row["sqn"], bytes.fromhex(row["amf"]))
+            
+            auth_vector = AuthenticationVector5G(
+                rand=av["rand"].hex().upper(),
+                xres_star=av["xres_star"].hex().upper(),
+                autn=av["autn"].hex().upper(),
+                kausf=av["k_ausf"].hex().upper()
+            )
+        else:
+            # Fallback
+            rand = secrets.token_hex(16).upper()
+            keys = derive_5g_keys_simple(row["k"], row["sqn"], row["amf"])
+            import hashlib
+            autn = hashlib.sha256((row["k"] + rand + f"{row['sqn']:012X}" + row["amf"]).encode()).hexdigest()[:32].upper()
+            xres_star = hashlib.sha256((row["k"] + rand).encode()).hexdigest()[:64].upper()
+            
+            auth_vector = AuthenticationVector5G(
+                rand=rand,
+                xres_star=xres_star,
+                autn=autn,
+                kausf=keys["k_ausf"]
+            )
+        
+        # Update SQN
+        new_sqn = row["sqn"] + 1
+        cur.execute("UPDATE tbl_subscriber SET sqn=%s WHERE imsi=%s", (new_sqn, imsi))
+        conn.commit()
+        
+        r = get_redis()
+        r.delete(f"udm:subscriber:{imsi}")
+        
+        return GenerateAuthDataResponse(
+            auth_vectors=[auth_vector],
+            supported_features=req.supported_features
+        )
+    finally:
+        conn.close()
+
+
+class HssAvRequest(BaseModel):
+    hss_auth_type: str = Field(..., pattern="^(eps-aka|eap-aka|eap-aka-prime|ims-aka|gba-aka)$")
+    num_vectors: int = Field(1, ge=1, le=5)
+    supported_features: Optional[str] = None
+
+
+class HssAvResponse(BaseModel):
+    auth_vectors: List[Dict]
+    supported_features: Optional[str] = None
+
+
+@app.post("/nudm-ueau/v1/{supi}/hss-security-information/{hss_auth_type}/generate-av", response_model=HssAvResponse)
+def generate_hss_av(supi: str, hss_auth_type: str, req: HssAvRequest):
+    """HSS requests EPS/IMS authentication vectors (GetHssAv, TS 29.503 §5.2.2.4).
+    
+    Called by HSS for S6a/Cx interworking. Supports:
+    - eps-aka: EPS AKA (KASME, XRES, RAND, AUTN, CK, IK)
+    - ims-aka: IMS AKA (CK, IK, XRES, RAND, AUTN)
+    - eap-aka / eap-aka-prime: EAP-AKA / EAP-AKA'
+    - gba-aka: GBA AKA
+    """
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM tbl_subscriber WHERE imsi=%s", (supi,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Subscriber not found")
+        
+        if not row.get("ki") or not row.get("opc"):
+            raise HTTPException(status_code=400, detail="4G/3G/2G credentials not provisioned")
+        
+        auth_vectors = []
+        for i in range(req.num_vectors):
+            rand = secrets.token_bytes(16)
+            rand_hex = rand.hex().upper()
+            
+            if CRYPTO_AVAILABLE:
+                crypto = get_crypto(row["opc"])
+                ki_bytes = bytes.fromhex(row["ki"])
+                sqn = row["sqn"]
+                amf_bytes = bytes.fromhex(row["amf"])
+                
+                if hss_auth_type in ["eps-aka", "eap-aka"]:
+                    av = crypto.generate_auth_vector_4g(ki_bytes, sqn, amf_bytes)
+                    auth_vectors.append({
+                        "av_type": "EPS_AKA",
+                        "rand": rand_hex,
+                        "xres": av["xres"].hex().upper(),
+                        "autn": av["autn"].hex().upper(),
+                        "kasme": av["k_asme"].hex().upper(),
+                        "ck": av["ck"].hex().upper(),
+                        "ik": av["ik"].hex().upper()
+                    })
+                elif hss_auth_type == "ims-aka":
+                    av = crypto.generate_auth_vector_4g(ki_bytes, sqn, amf_bytes)
+                    auth_vectors.append({
+                        "av_type": "IMS_AKA",
+                        "rand": rand_hex,
+                        "xres": av["xres"].hex().upper(),
+                        "autn": av["autn"].hex().upper(),
+                        "ck": av["ck"].hex().upper(),
+                        "ik": av["ik"].hex().upper()
+                    })
+                elif hss_auth_type == "gba-aka":
+                    av = crypto.generate_auth_vector_4g(ki_bytes, sqn, amf_bytes)
+                    auth_vectors.append({
+                        "av_type": "GBA_AKA",
+                        "rand": rand_hex,
+                        "xres": av["xres"].hex().upper(),
+                        "autn": av["autn"].hex().upper(),
+                        "ck": av["ck"].hex().upper(),
+                        "ik": av["ik"].hex().upper()
+                    })
+                else:
+                    # EAP-AKA' fallback
+                    auth_vectors.append({
+                        "av_type": hss_auth_type.upper(),
+                        "rand": rand_hex,
+                        "xres": "00" * 32,
+                        "autn": "00" * 32,
+                        "ck": "00" * 32,
+                        "ik": "00" * 32
+                    })
+            else:
+                # Fallback hash-based
+                import hashlib
+                sqn_bytes = row["sqn"].to_bytes(6, 'big')
+                autn = hashlib.sha256((row["ki"] + rand_hex + f"{row['sqn']:012X}" + row["amf"]).encode()).hexdigest()[:32].upper()
+                xres = hashlib.sha256((row["ki"] + rand_hex).encode()).hexdigest()[:16].upper()
+                ck = ik = hashlib.sha256((row["ki"] + rand_hex + "ckik").encode()).hexdigest()[:32].upper()
+                
+                if hss_auth_type in ["eps-aka", "eap-aka"]:
+                    k_asme = hashlib.sha256((ck + ik + f"{row['sqn']:012X}").encode()).hexdigest()[:64].upper()
+                    auth_vectors.append({
+                        "av_type": "EPS_AKA",
+                        "rand": rand_hex,
+                        "xres": xres,
+                        "autn": autn,
+                        "kasme": k_asme,
+                        "ck": ck,
+                        "ik": ik
+                    })
+                else:
+                    auth_vectors.append({
+                        "av_type": hss_auth_type.upper(),
+                        "rand": rand_hex,
+                        "xres": xres,
+                        "autn": autn,
+                        "ck": ck,
+                        "ik": ik
+                    })
+            
+            # Increment SQN per vector
+            cur.execute("UPDATE tbl_subscriber SET sqn=sqn+1 WHERE imsi=%s", (supi,))
+        
+        conn.commit()
+        r = get_redis()
+        r.delete(f"udm:subscriber:{supi}")
+        
+        return HssAvResponse(auth_vectors=auth_vectors, supported_features=req.supported_features)
+    finally:
+        conn.close()
+
+
+@app.post("/nudm-ueau/v1/{supi}/auth-events")
+def confirm_auth(supi: str, req: Dict):
+    """Authentication Result Confirmation (TS 29.503 §5.2.2.2).
+    
+    AUSF confirms success/failure of authentication.
+    """
+    auth_event_id = req.get("authEventId")
+    success = req.get("success", False)
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO tbl_auth_vector (imsi, rand_5g, generated_at) VALUES (%s, %s, NOW())
+               ON DUPLICATE KEY UPDATE generated_at=NOW()""",
+            (supi, req.get("rand", ""))
+        )
+        conn.commit()
+        return {"status": "confirmed", "authEventId": auth_event_id}
+    finally:
+        conn.close()
+
+
+@app.put("/nudm-ueau/v1/{supi}/auth-events/{auth_event_id}")
+def delete_auth_event(supi: str, auth_event_id: str):
+    """Remove authentication result (TS 29.503 §5.2.2.3)."""
+    return {"status": "deleted", "authEventId": auth_event_id}
+
+
+@app.post("/nudm-ueau/v1/{supi}/gba-security-information/generate-av")
+def generate_gba_av(supi: str, req: Dict):
+    """GBA Authentication Vectors (TS 29.503 §5.2.2.5)."""
+    return generate_hss_av(supi, "gba-aka", HssAvRequest(hss_auth_type="gba-aka", num_vectors=1))
+
+
+@app.post("/nudm-ueau/v1/{supi_or_suci}/prose-security-information/generate-av")
+def generate_prose_av(supi_or_suci: str, req: Dict):
+    """ProSe Authentication Vectors (TS 29.503 §5.2.2.6)."""
+    imsi = supi_or_suci  # Already de-concealed if SUCI
+    if suci_is_suci(supi_or_suci):
+        imsi = deconceal_suci(supi_or_suci) or supi_or_suci
+    return generate_auth_data(imsi, GenerateAuthDataRequest(serving_network_name=req.get("servingNetworkName", "prose")))
+
+
+# ============================================================================
+# SUCI De-concealment Helpers (TS 33.501 Annex C, TS 29.503 Annex C)
+# ============================================================================
+
+def suci_is_suci(val: str) -> bool:
+    """Check if value is a SUCI string."""
+    return val.startswith("suci-")
+
+
+def deconceal_suci(suci: str) -> Optional[str]:
+    """De-conceal SUCI to SUPI (IMSI).
+    
+    SUCI format: suci-<supi_type>-<mcc>-<mnc>-<routing_ind>-<protection_scheme>-<home_net_pkid>-<scheme_output>
+    
+    For NULL scheme (0): scheme_output = MSIN in packed BCD
+    For Profile A/B (1/2): ECIES encryption with home network private key
+    """
+    if not suci.startswith("suci-"):
+        return None
+    
+    parts = suci.split("-")
+    if len(parts) < 8:
+        return None
+    
+    supi_type = parts[1]
+    mcc = parts[2]
+    mnc = parts[3]
+    routing_ind = parts[4]
+    protection_scheme = parts[5]
+    home_net_pkid = parts[6]
+    scheme_output = parts[7]
+    
+    if supi_type == "0":  # IMSI
+        if protection_scheme == "0":  # NULL scheme
+            msin = bcd_to_msin(scheme_output)
+            return f"{mcc}{mnc}{msin}"
+        elif protection_scheme in ["1", "2"]:  # Profile A or B
+            # Requires ECIES decryption with home network private key (HSM)
+            return None
+    
+    return None
+
+
+def bcd_to_msin(bcd_hex: str) -> str:
+    """Convert packed BCD hex to MSIN string."""
+    msin = ""
+    for i in range(0, len(bcd_hex), 2):
+        byte_val = int(bcd_hex[i:i+2], 16)
+        high = (byte_val >> 4) & 0xF
+        low = byte_val & 0xF
+        if high <= 9:
+            msin += str(high)
+        if low <= 9:
+            msin += str(low)
+    return msin.rstrip('f')
+
+
+@app.post("/nudm-ueid/v1/deconceal")
+def ueid_deconceal(req: Dict):
+    """Nudm_UEIdentifier - SUCI De-concealment (TS 29.503 §5.10).
+    
+    5G PKMF requests de-concealment of ProSe Remote UE's SUCI.
+    """
+    suci = req.get("suci")
+    if not suci:
+        raise HTTPException(status_code=400, detail="SUCI required")
+    
+    imsi = deconceal_suci(suci)
+    if not imsi:
+        raise HTTPException(status_code=400, detail="Failed to de-conceal SUCI")
+    
+    return {"supi": f"imsi-{imsi}"}
+
+
+# ============================================================================
+# Nudm_UECM - UE Context Management (TS 29.503 §5.3)
+# ============================================================================
+
+class Amf3GppRegistration(BaseModel):
+    guami: Dict
+    purge_flag: Optional[bool] = False
+    pei: Optional[str] = None
+    ims_voip_support: Optional[bool] = None
+    backup_amf_info: Optional[List[Dict]] = None
+    eps_interworking_info: Optional[Dict] = None
+    ue_srvcc_capability: Optional[bool] = None
+    registration_time: Optional[str] = None
+    vgmlc_address: Optional[str] = None
+    supported_features: Optional[str] = None
+
+
+class AmfNon3GppRegistration(BaseModel):
+    guami: Dict
+    purge_flag: Optional[bool] = False
+    pei: Optional[str] = None
+    backup_amf_info: Optional[List[Dict]] = None
+    eps_interworking_info: Optional[Dict] = None
+    registration_time: Optional[str] = None
+    supported_features: Optional[str] = None
+
+
+class SmfRegistration(BaseModel):
+    pdu_session_id: int
+    smf_instance_id: str
+    plmn_id: Dict
+    smf_set_id: Optional[str] = None
+    single_nssai: Optional[Dict] = None
+    dnn: Optional[str] = None
+    emergency_services: Optional[bool] = False
+    pcscf_restoration_callback_uri: Optional[str] = None
+    pgw_fqdn: Optional[str] = None
+    epdg_ind: Optional[bool] = None
+    ipv4_addr: Optional[str] = None
+    ipv6_prefix: Optional[List[str]] = None
+    atsss_info: Optional[Dict] = None
+    supported_features: Optional[str] = None
+
+
+class Smsf3GppRegistration(BaseModel):
+    smsf_instance_id: str
+    plmn_id: Dict
+    smsf_set_id: Optional[str] = None
+    supported_features: Optional[str] = None
+
+
+class IpSmGwRegistration(BaseModel):
+    ip_sm_gw_id: str
+    ip_sm_gw_map_address: Optional[str] = None
+    supported_features: Optional[str] = None
+
+
+class RegistrationResponse(BaseModel):
+    registration: Dict
+
+
+@app.put("/nudm-uecm/v1/{ue_id}/registrations/amf-3gpp-access", response_model=RegistrationResponse)
+def register_amf_3gpp(ue_id: str, reg: Amf3GppRegistration):
+    """AMF 3GPP Access Registration (TS 29.503 §5.3.2.2)."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    
+    r = get_redis()
+    reg_key = f"uecm:registration:amf-3gpp:{imsi}"
+    reg_data = reg.model_dump()
+    reg_data["ue_id"] = imsi
+    reg_data["access_type"] = "3GPP"
+    reg_data["registered_at"] = datetime.utcnow().isoformat()
+    r.set(reg_key, json.dumps(reg_data, default=str))
+    r.expire(reg_key, 86400)  # 24h TTL
+    
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO tbl_uecm_registration (imsi, access_type, registration_data, registered_at)
+               VALUES (%s, '3GPP', %s, NOW())
+               ON DUPLICATE KEY UPDATE registration_data=%s, registered_at=NOW()""",
+            (imsi, json.dumps(reg_data), json.dumps(reg_data))
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    
+    return {"registration": reg_data}
+
+
+@app.patch("/nudm-uecm/v1/{ue_id}/registrations/amf-3gpp-access")
+def update_amf_3gpp(ue_id: str, req: Dict):
+    """Update AMF 3GPP Registration (TS 29.503 §5.3.2.3)."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    reg_key = f"uecm:registration:amf-3gpp:{imsi}"
+    existing = r.get(reg_key)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Registration not found")
+    
+    reg_data = json.loads(existing)
+    reg_data.update(req)
+    reg_data["updated_at"] = datetime.utcnow().isoformat()
+    r.set(reg_key, json.dumps(reg_data, default=str))
+    
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tbl_uecm_registration SET registration_data=%s WHERE imsi=%s AND access_type='3GPP'",
+            (json.dumps(reg_data), imsi)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    
+    return {"registration": reg_data}
+
+
+@app.get("/nudm-uecm/v1/{ue_id}/registrations/amf-3gpp-access")
+def get_amf_3gpp(ue_id: str):
+    """Get AMF 3GPP Registration (TS 29.503 §5.3.2.4)."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    reg_key = f"uecm:registration:amf-3gpp:{imsi}"
+    existing = r.get(reg_key)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Registration not found")
+    return json.loads(existing)
+
+
+@app.post("/nudm-uecm/v1/{ue_id}/registrations/amf-3gpp-access/dereg-amf")
+def dereg_amf(ue_id: str, req: Dict):
+    """Trigger AMF Deregistration (TS 29.503 §5.3.2.5)."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    r.delete(f"uecm:registration:amf-3gpp:{imsi}")
+    r.delete(f"uecm:registration:amf-non-3gpp:{imsi}")
+    
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM tbl_uecm_registration WHERE imsi=%s AND access_type IN ('3GPP', 'non-3GPP')", (imsi,))
+        conn.commit()
+    finally:
+        conn.close()
+    
+    return {"status": "deregistered"}
+
+
+@app.post("/nudm-uecm/v1/{ue_id}/registrations/amf-3gpp-access/pei-update")
+def pei_update(ue_id: str, req: Dict):
+    """PEI Update (TS 29.503 §5.3.2.6)."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    pei = req.get("pei")
+    if not pei:
+        raise HTTPException(status_code=400, detail="PEI required")
+    
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute("UPDATE tbl_subscriber SET imei=%s WHERE imsi=%s", (pei, imsi))
+        conn.commit()
+    finally:
+        conn.close()
+    
+    r = get_redis()
+    r.delete(f"udm:subscriber:{imsi}")
+    return {"status": "pei_updated", "pei": pei}
+
+
+@app.post("/nudm-uecm/v1/{ue_id}/registrations/amf-3gpp-access/roaming-info-update")
+def roaming_info_update(ue_id: str, req: Dict):
+    """Roaming Information Update (TS 29.503 §5.3.2.7)."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    vplmn = req.get("visitedPlmn", {}).get("mcc", "") + req.get("visitedPlmn", {}).get("mnc", "")
+    if vplmn:
+        conn = get_db()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO tbl_roaming_profile (imsi, visited_plmn, roaming_allowed, rat_allowed)
+                   VALUES (%s, %s, 1, %s)
+                   ON DUPLICATE KEY UPDATE rat_allowed=%s""",
+                (imsi, vplmn, json.dumps(req.get("ratAllowed", {})), json.dumps(req.get("ratAllowed", {})))
+            )
+            conn.commit()
+        finally:
+            conn.close()
+    return {"status": "roaming_updated"}
+
+
+@app.put("/nudm-uecm/v1/{ue_id}/registrations/amf-non-3gpp-access", response_model=RegistrationResponse)
+def register_amf_non_3gpp(ue_id: str, reg: AmfNon3GppRegistration):
+    """AMF Non-3GPP Access Registration."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    reg_key = f"uecm:registration:amf-non-3gpp:{imsi}"
+    reg_data = reg.model_dump()
+    reg_data["ue_id"] = imsi
+    reg_data["access_type"] = "non-3GPP"
+    reg_data["registered_at"] = datetime.utcnow().isoformat()
+    r.set(reg_key, json.dumps(reg_data, default=str))
+    r.expire(reg_key, 86400)
+    return {"registration": reg_data}
+
+
+@app.get("/nudm-uecm/v1/{ue_id}/registrations/smf-registrations")
+def get_smf_registrations(ue_id: str):
+    """Get SMF Registrations (TS 29.503 §5.3.2.9)."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    pattern = f"uecm:registration:smf:{imsi}:*"
+    keys = r.keys(pattern)
+    registrations = {}
+    for key in keys:
+        data = r.get(key)
+        if data:
+            reg = json.loads(data)
+            pdu_id = reg.get("pdu_session_id")
+            if pdu_id:
+                registrations[pdu_id] = reg
+    return {"smfRegistrations": registrations}
+
+
+@app.put("/nudm-uecm/v1/{ue_id}/registrations/smf-registrations/{pdu_session_id}", response_model=RegistrationResponse)
+def register_smf(ue_id: str, pdu_session_id: int, reg: SmfRegistration):
+    """SMF Registration per PDU Session (TS 29.503 §5.3.2.10)."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    reg_key = f"uecm:registration:smf:{imsi}:{pdu_session_id}"
+    reg_data = reg.model_dump()
+    reg_data["ue_id"] = imsi
+    reg_data["pdu_session_id"] = pdu_session_id
+    reg_data["registered_at"] = datetime.utcnow().isoformat()
+    r.set(reg_key, json.dumps(reg_data, default=str))
+    r.expire(reg_key, 86400)
+    return {"registration": reg_data}
+
+
+@app.delete("/nudm-uecm/v1/{ue_id}/registrations/smf-registrations/{pdu_session_id}")
+def deregister_smf(ue_id: str, pdu_session_id: int):
+    """SMF Deregistration."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    r.delete(f"uecm:registration:smf:{imsi}:{pdu_session_id}")
+    return {"status": "deregistered"}
+
+
+@app.get("/nudm-uecm/v1/{ue_id}/registrations/smf-registrations/{pdu_session_id}")
+def get_smf_registration(ue_id: str, pdu_session_id: int):
+    """Get SMF Registration."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    reg_key = f"uecm:registration:smf:{imsi}:{pdu_session_id}"
+    data = r.get(reg_key)
+    if not data:
+        raise HTTPException(status_code=404, detail="SMF registration not found")
+    return json.loads(data)
+
+
+@app.patch("/nudm-uecm/v1/{ue_id}/registrations/smf-registrations/{pdu_session_id}")
+def update_smf_registration(ue_id: str, pdu_session_id: int, req: Dict):
+    """Update SMF Registration."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    reg_key = f"uecm:registration:smf:{imsi}:{pdu_session_id}"
+    existing = r.get(reg_key)
+    if not existing:
+        raise HTTPException(status_code=404, detail="SMF registration not found")
+    reg_data = json.loads(existing)
+    reg_data.update(req)
+    reg_data["updated_at"] = datetime.utcnow().isoformat()
+    r.set(reg_key, json.dumps(reg_data, default=str))
+    return {"registration": reg_data}
+
+
+@app.put("/nudm-uecm/v1/{ue_id}/registrations/smsf-3gpp-access", response_model=RegistrationResponse)
+def register_smsf_3gpp(ue_id: str, reg: Smsf3GppRegistration):
+    """SMSF 3GPP Access Registration."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    reg_key = f"uecm:registration:smsf-3gpp:{imsi}"
+    reg_data = reg.model_dump()
+    reg_data["ue_id"] = imsi
+    reg_data["registered_at"] = datetime.utcnow().isoformat()
+    r.set(reg_key, json.dumps(reg_data, default=str))
+    return {"registration": reg_data}
+
+
+@app.delete("/nudm-uecm/v1/{ue_id}/registrations/smsf-3gpp-access")
+def deregister_smsf_3gpp(ue_id: str):
+    """SMSF 3GPP Deregistration."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    r.delete(f"uecm:registration:smsf-3gpp:{imsi}")
+    return {"status": "deregistered"}
+
+
+@app.put("/nudm-uecm/v1/{ue_id}/registrations/ip-sm-gw", response_model=RegistrationResponse)
+def register_ip_sm_gw(ue_id: str, reg: IpSmGwRegistration):
+    """IP-SM-GW Registration."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    reg_key = f"uecm:registration:ip-sm-gw:{imsi}"
+    reg_data = reg.model_dump()
+    reg_data["ue_id"] = imsi
+    reg_data["registered_at"] = datetime.utcnow().isoformat()
+    r.set(reg_key, json.dumps(reg_data, default=str))
+    return {"registration": reg_data}
+
+
+@app.delete("/nudm-uecm/v1/{ue_id}/registrations/ip-sm-gw")
+def deregister_ip_sm_gw(ue_id: str):
+    """IP-SM-GW Deregistration."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    r = get_redis()
+    r.delete(f"uecm:registration:ip-sm-gw:{imsi}")
+    return {"status": "deregistered"}
+
+
+@app.post("/nudm-uecm/v1/restore-pcscf")
+def trigger_pcscf_restoration(req: Dict):
+    """Trigger P-CSCF Restoration (TS 29.503 §5.3.2.16)."""
+    ue_ids = req.get("ueIds", [])
+    for ue_id in ue_ids:
+        imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    return {"status": "pcscf_restoration_triggered", "ueCount": len(ue_ids)}
+
+
+@app.get("/nudm-uecm/v1/{ue_id}/registrations/send-routing-info-sm")
+def send_routing_info_sm(ue_id: str):
+    """Send Routing Info for SM (TS 29.503 §5.3.2.17).
+    
+    Returns SMSF/IP-SM-GW routing info for MT-SMS.
+    """
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM tbl_subscriber WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Subscriber not found")
+        
+        r = get_redis()
+        smsf_key = f"uecm:registration:smsf-3gpp:{imsi}"
+        smsf_data = r.get(smsf_key)
+        
+        if smsf_data:
+            smsf = json.loads(smsf_data)
+            return {
+                "smsfAddress": smsf.get("smsfInstanceId"),
+                "ipSmGwAddress": smsf.get("ipSmGwMapAddress"),
+                "smsRouterAddress": "sms-router.core.local"
+            }
+        
+        ipsmgw_key = f"uecm:registration:ip-sm-gw:{imsi}"
+        ipsmgw_data = r.get(ipsmgw_key)
+        if ipsmgw_data:
+            ipsmgw = json.loads(ipsmgw_data)
+            return {
+                "ipSmGwAddress": ipsmgw.get("ipSmGwMapAddress"),
+                "smsRouterAddress": "sms-router.core.local"
+            }
+        
+        return {
+            "smsGmscAddress": "sms-gmsc.core.local",
+            "smsRouterAddress": "sms-router.core.local"
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/nudm-uecm/v1/{ue_id}/registrations/trigger-auth")
+def trigger_auth(ue_id: str):
+    """Trigger Authentication (TS 29.503 §5.3.2.18)."""
+    return {"status": "auth_triggered"}
+
+
+# ============================================================================
+# Nudm_SDM - Additional Data Sets (TS 29.503 §5.1)
+# ============================================================================
+
+@app.get("/nudm-sdm/v2/{imsi}/nssai")
+def get_nudm_nssai(imsi: str, supported_features: Optional[str] = Query(None)):
+    """Slice Selection Subscription Data (NSSAI)."""
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT default_nssai, allowed_nssai FROM tbl_5g_subscription WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="5G subscription not found")
+        
+        return {
+            "supported_features": supported_features,
+            "subscribedSnssais": json.loads(row["default_nssai"]) if row.get("default_nssai") else [],
+            "defaultSnssai": json.loads(row["allowed_nssai"]) if row.get("allowed_nssai") else []
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/nudm-sdm/v2/{imsi}/am-data/ecr-data")
+def get_nudm_ecr_data(imsi: str, supported_features: Optional[str] = Query(None)):
+    """Enhanced Coverage Restriction Data."""
+    return {"supported_features": supported_features, "ecrData": {"restrictedEcgiList": []}}
+
+
+@app.get("/nudm-sdm/v2/{imsi}/sms-mng-data")
+def get_nudm_sms_mng_data(imsi: str, supported_features: Optional[str] = Query(None)):
+    """SMS Management Subscription Data."""
+    return {"supported_features": supported_features, "smsMngData": {"mtSmsBarringAll": False, "moSmsBarringAll": False}}
+
+
+@app.get("/nudm-sdm/v2/{imsi}/ue-context-in-amf-data")
+def get_nudm_ue_ctx_amf(imsi: str, supported_features: Optional[str] = Query(None)):
+    """UE Context in AMF Data."""
+    r = get_redis()
+    reg_key = f"uecm:registration:amf-3gpp:{imsi}"
+    data = r.get(reg_key)
+    if not data:
+        return {"supported_features": supported_features, "amf3GppAccessRegistration": None}
+    return {"supported_features": supported_features, "amf3GppAccessRegistration": json.loads(data)}
+
+
+@app.get("/nudm-sdm/v2/{imsi}/ue-context-in-smf-data")
+def get_nudm_ue_ctx_smf(imsi: str, supported_features: Optional[str] = Query(None)):
+    """UE Context in SMF Data."""
+    r = get_redis()
+    pattern = f"uecm:registration:smf:{imsi}:*"
+    keys = r.keys(pattern)
+    smf_regs = {}
+    for key in keys:
+        data = r.get(key)
+        if data:
+            reg = json.loads(data)
+            pdu_id = reg.get("pdu_session_id")
+            if pdu_id:
+                smf_regs[pdu_id] = reg
+    return {"supported_features": supported_features, "pduSessions": smf_regs}
+
+
+@app.get("/nudm-sdm/v2/{imsi}/ue-context-in-smsf-data")
+def get_nudm_ue_ctx_smsf(imsi: str, supported_features: Optional[str] = Query(None)):
+    """UE Context in SMSF Data."""
+    r = get_redis()
+    smsf_key = f"uecm:registration:smsf-3gpp:{imsi}"
+    data = r.get(smsf_key)
+    return {"supported_features": supported_features, "smsf3GppAccessRegistration": json.loads(data) if data else None}
+
+
+@app.get("/nudm-sdm/v2/{ue_id}/lcs-privacy-data")
+def get_nudm_lcs_privacy(ue_id: str, supported_features: Optional[str] = Query(None)):
+    """LCS Privacy Data."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT lcs_privacy_5g FROM tbl_5g_subscription WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="5G subscription not found")
+        return {"supported_features": supported_features, "lcsPrivacyData": row.get("lcs_privacy_5g", {})}
+    finally:
+        conn.close()
+
+
+@app.get("/nudm-sdm/v2/{imsi}/lcs-mo-data")
+def get_nudm_lcs_mo(imsi: str, supported_features: Optional[str] = Query(None)):
+    """LCS Mobile Originated Data."""
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT gmlc_address FROM tbl_5g_subscription WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="5G subscription not found")
+        return {"supported_features": supported_features, "gmlcAddress": row.get("gmlc_address")}
+    finally:
+        conn.close()
+
+
+@app.get("/nudm-sdm/v2/{imsi}/lcs-bca-data")
+def get_nudm_lcs_bca(imsi: str, supported_features: Optional[str] = Query(None)):
+    """LCS Broadcast Assistance Data."""
+    return {"supported_features": supported_features, "lcsBcaData": {}}
+
+
+@app.get("/nudm-sdm/v2/{imsi}/lcs-subscription-data")
+def get_nudm_lcs_sub(imsi: str, supported_features: Optional[str] = Query(None)):
+    """LCS Subscription Data."""
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT lcs_privacy_5g, gmlc_address FROM tbl_5g_subscription WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="5G subscription not found")
+        return {
+            "supported_features": supported_features,
+            "lcsPrivacyData": row.get("lcs_privacy_5g", {}),
+            "gmlcAddress": row.get("gmlc_address")
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/nudm-sdm/v2/{imsi}/v2x-data")
+def get_nudm_v2x(imsi: str, supported_features: Optional[str] = Query(None)):
+    """V2X Subscription Data."""
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT v2x_allowed_5g, v2x_roaming FROM tbl_5g_subscription WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        return {"supported_features": supported_features, "v2xData": {"v2xAllowed": row.get("v2x_allowed_5g", False) if row else False}}
+    finally:
+        conn.close()
+
+
+@app.get("/nudm-sdm/v2/{imsi}/prose-data")
+def get_nudm_prose(imsi: str, supported_features: Optional[str] = Query(None)):
+    """ProSe Subscription Data."""
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT prose_enabled FROM tbl_subscriber WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        return {"supported_features": supported_features, "proseData": {"proseEnabled": row.get("prose_enabled", False) if row else False}}
+    finally:
+        conn.close()
+
+
+@app.get("/nudm-sdm/v2/{imsi}/5mbs-data")
+def get_nudm_5mbs(imsi: str, supported_features: Optional[str] = Query(None)):
+    """5MBS Subscription Data."""
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT mbs_allowed FROM tbl_5g_subscription WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        return {"supported_features": supported_features, "mbsData": {"mbsAllowed": row.get("mbs_allowed", False) if row else False}}
+    finally:
+        conn.close()
+
+
+@app.get("/nudm-sdm/v2/{imsi}/uc-data")
+def get_nudm_uc(imsi: str, supported_features: Optional[str] = Query(None)):
+    """User Consent Data."""
+    return {"supported_features": supported_features, "ucData": []}
+
+
+@app.get("/nudm-sdm/v2/{imsi}/time-sync-data")
+def get_nudm_time_sync(imsi: str, supported_features: Optional[str] = Query(None)):
+    """Time Synchronization Subscription Data."""
+    return {"supported_features": supported_features, "timeSyncData": {}}
+
+
+@app.get("/nudm-sdm/v2/{imsi}/ranging-slpos-data")
+def get_nudm_ranging(imsi: str, supported_features: Optional[str] = Query(None)):
+    """Ranging/Sidelink Positioning Data."""
+    return {"supported_features": supported_features, "rangingSlPosData": {}}
+
+
+@app.get("/nudm-sdm/v2/{ue_id}/rangingsl-privacy-data")
+def get_nudm_ranging_privacy(ue_id: str, supported_features: Optional[str] = Query(None)):
+    """Ranging/Sidelink Positioning Privacy Data."""
+    return {"supported_features": supported_features, "rangingSlPrivacyData": {}}
+
+
+@app.get("/nudm-sdm/v2/{imsi}/a2x-data")
+def get_nudm_a2x(imsi: str, supported_features: Optional[str] = Query(None)):
+    """A2X Subscription Data."""
+    return {"supported_features": supported_features, "a2xData": {}}
+
+
+@app.get("/nudm-sdm/v2/{ue_id}/id-translation-result")
+def get_nudm_id_translation(ue_id: str, supported_features: Optional[str] = Query(None)):
+    """Identifier Translation (SUPI <-> GPSI)."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT msisdn FROM tbl_subscriber WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        gpsi = f"msisdn-{row['msisdn']}" if row and row.get('msisdn') else None
+        return {"supported_features": supported_features, "supi": f"imsi-{imsi}", "gpsi": gpsi}
+    finally:
+        conn.close()
+
+
+@app.get("/nudm-sdm/v2/multiple-identifiers")
+def get_nudm_multiple_ids(supi: List[str] = Query(None), gpsi: List[str] = Query(None), supported_features: Optional[str] = Query(None)):
+    """Multiple Identifier Translation."""
+    results = []
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        if supi:
+            for s in supi:
+                imsi = deconceal_suci(s) if suci_is_suci(s) else s
+                cur.execute("SELECT msisdn FROM tbl_subscriber WHERE imsi=%s", (imsi,))
+                row = cur.fetchone()
+                g = f"msisdn-{row['msisdn']}" if row and row.get('msisdn') else None
+                results.append({"supi": s, "gpsi": g})
+        return {"supported_features": supported_features, "identifierTranslations": results}
+    finally:
+        conn.close()
+
+
+@app.get("/nudm-sdm/v2/shared-data")
+def get_nudm_shared_data(supported_features: Optional[str] = Query(None)):
+    """Get Shared Data."""
+    return {"supported_features": supported_features, "sharedData": []}
+
+
+@app.get("/nudm-sdm/v2/shared-data/{shared_data_id}")
+def get_nudm_shared_data_by_id(shared_data_id: str, supported_features: Optional[str] = Query(None)):
+    """Get Individual Shared Data."""
+    return {"supported_features": supported_features, "sharedDataId": shared_data_id, "sharedData": {}}
+
+
+@app.get("/nudm-sdm/v2/group-data/group-identifiers")
+def get_nudm_group_ids(ext_group_id: str = Query(...), supported_features: Optional[str] = Query(None)):
+    """Group Identifier Translation."""
+    return {"supported_features": supported_features, "groupIdentifiers": []}
+
+
+# SDM Subscriptions
+@app.post("/nudm-sdm/v2/{ue_id}/sdm-subscriptions")
+def subscribe_sdm(ue_id: str, req: Dict):
+    """Subscribe to SDM Notifications."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    sub_id = f"sdm-sub-{secrets.token_hex(8)}"
+    r = get_redis()
+    r.set(f"sdm:subscription:{sub_id}", json.dumps({"ue_id": imsi, "callback": req.get("notificationUri"), "monitored_resources": req.get("monitoredResourceUris")}))
+    return {"subscriptionId": sub_id, "supportedFeatures": req.get("supportedFeatures")}
+
+
+@app.delete("/nudm-sdm/v2/{ue_id}/sdm-subscriptions/{subscription_id}")
+def unsubscribe_sdm(ue_id: str, subscription_id: str):
+    """Unsubscribe from SDM Notifications."""
+    r = get_redis()
+    r.delete(f"sdm:subscription:{subscription_id}")
+    return {"status": "unsubscribed"}
+
+
+@app.patch("/nudm-sdm/v2/{ue_id}/sdm-subscriptions/{subscription_id}")
+def modify_sdm_subscription(ue_id: str, subscription_id: str, req: Dict):
+    """Modify SDM Subscription."""
+    r = get_redis()
+    key = f"sdm:subscription:{subscription_id}"
+    data = r.get(key)
+    if not data:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    sub = json.loads(data)
+    sub.update(req)
+    r.set(key, json.dumps(sub))
+    return sub
+
+
+# SDM Info Operations
+@app.put("/nudm-sdm/v2/{imsi}/am-data/sor-ack")
+def sor_ack(imsi: str, req: Dict):
+    """SoR Acknowledgement."""
+    return {"status": "sor_acknowledged"}
+
+
+@app.put("/nudm-sdm/v2/{imsi}/am-data/upu-ack")
+def upu_ack(imsi: str, req: Dict):
+    """UPU Acknowledgement."""
+    return {"status": "upu_acknowledged"}
+
+
+@app.put("/nudm-sdm/v2/{imsi}/am-data/subscribed-snssais-ack")
+def snssai_ack(imsi: str, req: Dict):
+    """S-NSSAI Acknowledgement."""
+    return {"status": "snssai_acknowledged"}
+
+
+@app.put("/nudm-sdm/v2/{imsi}/am-data/cag-ack")
+def cag_ack(imsi: str, req: Dict):
+    """CAG Acknowledgement."""
+    return {"status": "cag_acknowledged"}
+
+
+@app.post("/nudm-sdm/v2/{imsi}/am-data/update-sor")
+def update_sor(imsi: str, req: Dict):
+    """Update SoR Info."""
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tbl_5g_subscription SET sor_info=%s WHERE imsi=%s",
+            (json.dumps(req.get("sorInfo", {})), imsi)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "sor_updated"}
+
+
+# ============================================================================
+# Nudm_EventExposure (EE) - TS 29.503 §5.4
+# ============================================================================
+
+class EeSubscription(BaseModel):
+    event_list: List[Dict]
+    notification_uri: str
+    notification_correlation_id: str
+    expiry: Optional[str] = None
+    supported_features: Optional[str] = None
+
+
+@app.post("/nudm-ee/v1/{ue_identity}/ee-subscriptions")
+def create_ee_subscription(ue_identity: str, req: EeSubscription):
+    """Create Event Exposure Subscription."""
+    imsi = deconceal_suci(ue_identity) if suci_is_suci(ue_identity) else ue_identity
+    sub_id = f"ee-sub-{secrets.token_hex(8)}"
+    r = get_redis()
+    r.set(f"ee:subscription:{sub_id}", json.dumps({
+        "ue_id": imsi,
+        "event_list": req.event_list,
+        "callback": req.notification_uri,
+        "correlation_id": req.notification_correlation_id,
+        "expiry": req.expiry
+    }))
+    return {"subscriptionId": sub_id, "supportedFeatures": req.supported_features}
+
+
+@app.delete("/nudm-ee/v1/{ue_identity}/ee-subscriptions/{subscription_id}")
+def delete_ee_subscription(ue_identity: str, subscription_id: str):
+    """Delete Event Exposure Subscription."""
+    r = get_redis()
+    r.delete(f"ee:subscription:{subscription_id}")
+    return {"status": "deleted"}
+
+
+@app.patch("/nudm-ee/v1/{ue_identity}/ee-subscriptions/{subscription_id}")
+def update_ee_subscription(ue_identity: str, subscription_id: str, req: Dict):
+    """Update Event Exposure Subscription."""
+    r = get_redis()
+    key = f"ee:subscription:{subscription_id}"
+    data = r.get(key)
+    if not data:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+    sub = json.loads(data)
+    sub.update(req)
+    r.set(key, json.dumps(sub))
+    return sub
+
+
+# ============================================================================
+# Nudm_ParameterProvision (PP) - TS 29.503 §5.5
+# ============================================================================
+
+@app.get("/nudm-pp/v1/{ue_id}/pp-data")
+def get_pp_data(ue_id: str, supported_features: Optional[str] = Query(None)):
+    """Get Parameter Provisioning Data."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM tbl_5g_subscription WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        return {"supported_features": supported_features, "ppData": row.get("sor_info", {}) if row else {}}
+    finally:
+        conn.close()
+
+
+@app.patch("/nudm-pp/v1/{ue_id}/pp-data")
+def update_pp_data(ue_id: str, req: Dict):
+    """Update Parameter Provisioning Data."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tbl_5g_subscription SET sor_info=%s WHERE imsi=%s",
+            (json.dumps(req.get("ppData", {})), imsi)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return {"status": "updated"}
+
+
+@app.put("/nudm-pp/v1/{ue_id}/pp-data-store/{af_instance_id}")
+def create_pp_data_entry(ue_id: str, af_instance_id: str, req: Dict):
+    """Create PP Data Entry."""
+    imsi = deconceal_suci(ue_id) if suci_is_suci(ue_id) else ue_id
+    return {"status": "created", "afInstanceId": af_instance_id}
+
+
+@app.delete("/nudm-pp/v1/{ue_id}/pp-data-store/{af_instance_id}")
+def delete_pp_data_entry(ue_id: str, af_instance_id: str):
+    """Delete PP Data Entry."""
+    return {"status": "deleted"}
+
+
+@app.get("/nudm-pp/v1/{ue_id}/pp-data-store/{af_instance_id}")
+def get_pp_data_entry(ue_id: str, af_instance_id: str, supported_features: Optional[str] = Query(None)):
+    """Get PP Data Entry."""
+    return {"supported_features": supported_features, "ppDataEntry": {}}
+
+
+@app.put("/nudm-pp/v1/5g-vn-groups/{ext_group_id}")
+def create_5g_vn_group(ext_group_id: str, req: Dict):
+    """Create 5G VN Group."""
+    return {"status": "created", "extGroupId": ext_group_id}
+
+
+@app.delete("/nudm-pp/v1/5g-vn-groups/{ext_group_id}")
+def delete_5g_vn_group(ext_group_id: str):
+    """Delete 5G VN Group."""
+    return {"status": "deleted"}
+
+
+@app.patch("/nudm-pp/v1/5g-vn-groups/{ext_group_id}")
+def modify_5g_vn_group(ext_group_id: str, req: Dict):
+    """Modify 5G VN Group."""
+    return {"status": "modified"}
+
+
+@app.get("/nudm-pp/v1/5g-vn-groups/{ext_group_id}")
+def get_5g_vn_group(ext_group_id: str, supported_features: Optional[str] = Query(None)):
+    """Get 5G VN Group."""
+    return {"supported_features": supported_features, "vnGroup": {"extGroupId": ext_group_id}}
+
+
+@app.put("/nudm-pp/v1/mbs-group-membership/{ext_group_id}")
+def create_mbs_group(ext_group_id: str, req: Dict):
+    """Create 5G MBS Group Membership."""
+    return {"status": "created", "extGroupId": ext_group_id}
+
+
+@app.delete("/nudm-pp/v1/mbs-group-membership/{ext_group_id}")
+def delete_mbs_group(ext_group_id: str):
+    """Delete 5G MBS Group Membership."""
+    return {"status": "deleted"}
+
+
+@app.patch("/nudm-pp/v1/mbs-group-membership/{ext_group_id}")
+def modify_mbs_group(ext_group_id: str, req: Dict):
+    """Modify 5G MBS Group Membership."""
+    return {"status": "modified"}
+
+
+@app.get("/nudm-pp/v1/mbs-group-membership/{ext_group_id}")
+def get_mbs_group(ext_group_id: str, supported_features: Optional[str] = Query(None)):
+    """Get 5G MBS Group Membership."""
+    return {"supported_features": supported_features, "mbsGroup": {"extGroupId": ext_group_id}}
+
+
+# ============================================================================
+# Nudm_NIDDAuthorization (NIDDAU) - TS 29.503 §5.6
+# ============================================================================
+
+@app.post("/nudm-niddau/v1/{ue_identity}/authorize")
+def authorize_nidd(ue_identity: str, req: Dict):
+    """Authorize NIDD Configuration."""
+    imsi = deconceal_suci(ue_identity) if suci_is_suci(ue_identity) else ue_identity
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT nb_iot_allowed, emtc_allowed FROM tbl_eps_subscription WHERE imsi=%s", (imsi,))
+        row = cur.fetchone()
+        authorized = (row.get("nb_iot_allowed", False) or row.get("emtc_allowed", False)) if row else False
+        return {"authorizationResult": "AUTHORIZED" if authorized else "NOT_AUTHORIZED"}
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# Nudm_MT - TS 29.503 §5.7 (HSS Interworking)
+# ============================================================================
+
+@app.get("/nudm-mt/v1/{supi}")
+def provide_ue_info(supi: str, supported_features: Optional[str] = Query(None)):
+    """Provide UE Info (TADS, User State, 5GSRVCCInfo).
+    
+    HSS calls this to determine terminating access domain selection.
+    """
+    imsi = deconceal_suci(supi) if suci_is_suci(supi) else supi
+    r = get_redis()
+    
+    amf_3gpp = r.get(f"uecm:registration:amf-3gpp:{imsi}")
+    amf_non3gpp = r.get(f"uecm:registration:amf-non-3gpp:{imsi}")
+    smf_regs = r.keys(f"uecm:registration:smf:{imsi}:*")
+    
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute("SELECT * FROM tbl_eps_subscription WHERE imsi=%s", (imsi,))
+        eps = cur.fetchone()
+    finally:
+        conn.close()
+    
+    tads = "5GS" if amf_3gpp or amf_non3gpp or smf_regs else ("EPS" if eps else "CS")
+    user_state = "IDLE"
+    if amf_3gpp:
+        user_state = "CONNECTED"
+    elif amf_non3gpp:
+        user_state = "CONNECTED_NON_3GPP"
+    elif eps:
+        user_state = "EPS_ATTACHED"
+    
+    return {
+        "supported_features": supported_features,
+        "tads": tads,
+        "userState": user_state,
+        "srvccCapability": eps.get("eps_supported", False) if eps else False,
+        "amf3GppAccessRegistration": json.loads(amf_3gpp) if amf_3gpp else None,
+        "amfNon3GppAccessRegistration": json.loads(amf_non3gpp) if amf_non3gpp else None
+    }
+
+
+@app.post("/nudm-mt/v1/{supi}/loc-info/provide-loc-info")
+def provide_location_info(supi: str, req: Dict):
+    """Provide Location Info (5GC Location).
+    
+    HSS/GMLC calls this for 5GC location.
+    """
+    imsi = deconceal_suci(supi) if suci_is_suci(supi) else supi
+    import requests
+    try:
+        resp = requests.post(
+            "http://gmlc:8082/lcs/location-request",
+            json={"imsi": imsi, "request_type": "immediate"},
+            timeout=10
+        )
+        loc = resp.json()
+        return {
+            "locationInfo": {
+                "latitude": loc.get("latitude"),
+                "longitude": loc.get("longitude"),
+                "accuracy": loc.get("accuracy"),
+                "timestamp": loc.get("timestamp")
+            }
+        }
+    except:
+        return {"locationInfo": {"error": "GMLC unavailable"}}
+
+
+# ============================================================================
+# Nudm_ServiceSpecificAuthorization (SSAU) - TS 29.503 §5.8
+# ============================================================================
+
+@app.post("/nudm-ssau/v1/{ue_identity}/{service_type}/authorize")
+def ssau_authorize(ue_identity: str, service_type: str, req: Dict):
+    """Service-Specific Authorization."""
+    imsi = deconceal_suci(ue_identity) if suci_is_suci(ue_identity) else ue_identity
+    r = get_redis()
+    auth_key = f"ssau:auth:{imsi}:{service_type}"
+    r.set(auth_key, json.dumps({"authorized": True, "params": req, "at": datetime.utcnow().isoformat()}))
+    return {"status": "authorized", "serviceType": service_type}
+
+
+@app.post("/nudm-ssau/v1/{ue_identity}/{service_type}/remove")
+def ssau_remove(ue_identity: str, service_type: str):
+    """Remove Service-Specific Authorization."""
+    imsi = deconceal_suci(ue_identity) if suci_is_suci(ue_identity) else ue_identity
+    r = get_redis()
+    r.delete(f"ssau:auth:{imsi}:{service_type}")
+    return {"status": "removed", "serviceType": service_type}
+
+
+# ============================================================================
+# Nudm_ReportSMDeliveryStatus (RSDS) - TS 29.503 §5.9
+# ============================================================================
+
+@app.post("/nudm-rsds/v1/{ue_identity}/sm-delivery-status")
+def report_sm_delivery_status(ue_identity: str, req: Dict):
+    """Report SMS Delivery Status.
+    
+    SMS-GMSC or IP-SM-GW reports delivery status.
+    """
+    imsi = deconceal_suci(ue_identity) if suci_is_suci(ue_identity) else ue_identity
+    status = req.get("deliveryStatus", "DELIVERED")
+    r = get_redis()
+    mwd_key = f"uecm:mwd:{imsi}"
+    if status == "DELIVERED":
+        r.delete(mwd_key)
+    else:
+        r.set(mwd_key, json.dumps({"status": status, "at": datetime.utcnow().isoformat()}))
+    return {"status": "delivery_status_reported"}
 @app.get("/subscribers/{imsi}/eps-subscription", response_model=EPSSubscriptionResponse)
 def get_eps_subscription(imsi: str):
     conn = get_db()

@@ -24,6 +24,8 @@ from .models import (
     NetworkNode,
     # Batch -> hssdb
     BatchUpload, IMSIRange,
+    # UECM -> hssdb
+    UECMRegistration,
 )
 
 
@@ -39,6 +41,7 @@ class DatabaseRouter:
         USSDRoute, CamelServiceProfile,
         NetworkNode,
         BatchUpload, IMSIRange,
+        UECMRegistration,
     }
     
     # Models that go to default (srg_db)

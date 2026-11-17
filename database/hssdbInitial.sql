@@ -600,5 +600,21 @@ VALUES
     ('upf-01', 'UPF', 'upf-01.mnc01.mcc208.3gppnetwork.org', '10.1.10.90', 'upf-01.mnc01.mcc208.3gppnetwork.org', 'mnc01.mcc208.3gppnetwork.org', 3868, 0, '', '20801', '["N3","N4","N6","N9"]');
 
 -- ============================================================================
+-- UE CONTEXT MANAGEMENT (TS 29.503 Nudm_UECM)
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS tbl_uecm_registration (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+    imsi VARCHAR(15) NOT NULL,
+    access_type ENUM('3GPP', 'non-3GPP') NOT NULL,
+    registration_data JSON,
+    registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_imsi_access (imsi, access_type),
+    FOREIGN KEY (imsi) REFERENCES tbl_subscriber(imsi) ON DELETE CASCADE
+) ENGINE=InnoDB COMMENT='UECM Registrations per TS 29.503 (Rel-15 to Rel-20)';
+
+-- ============================================================================
 -- End of hssdbInitial.sql
 -- ============================================================================

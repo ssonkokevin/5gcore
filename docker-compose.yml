@@ -139,6 +139,128 @@ services:
       - core-net
 
   # ========================================================================
+  # Diameter S6a/Cx Server (HSS/HLR Interworking)
+  # ========================================================================
+  diameter-s6a-cx:
+    build:
+      context: .
+      dockerfile: docker/diameter/Dockerfile
+    container_name: core-diameter-s6a-cx
+    restart: unless-stopped
+    depends_on:
+      hssdb:
+        condition: service_healthy
+    environment:
+      - DIAMETER_ORIGIN_HOST=${DIAMETER_ORIGIN_HOST:-hss.core.local}
+      - DIAMETER_ORIGIN_REALM=${DIAMETER_ORIGIN_REALM:-core.local}
+      - DIAMETER_VENDOR_ID=${DIAMETER_VENDOR_ID:-10415}
+      - DIAMETER_PRODUCT_NAME=${DIAMETER_PRODUCT_NAME:-5G-Core-HSS}
+      - DIAMETER_PORT=${DIAMETER_PORT:-3868}
+      - DB_HOST=hssdb
+      - DB_PORT=3306
+      - DB_USER=hss
+      - DB_PASSWORD=${HSS_DB_PASSWORD}
+      - DB_NAME=hssdb
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "3868:3868/tcp"
+      - "3868:3868/sctp"
+    command: ["python", "/app/src/diameter_server.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # MAP/SCCP Stack (2G/3G HLR Interworking)
+  # ========================================================================
+  map-sccp:
+    build:
+      context: .
+      dockerfile: docker/map_sccp/Dockerfile
+    container_name: core-map-sccp
+    restart: unless-stopped
+    depends_on:
+      hssdb:
+        condition: service_healthy
+    environment:
+      - MAP_POINT_CODE=3142
+      - MAP_SSN_MAP=6
+      - MAP_GT_MAP=208010000000000
+      - MAP_PORT=2905
+      - DB_HOST=hssdb
+      - DB_PORT=3306
+      - DB_USER=hss
+      - DB_PASSWORD=${HSS_DB_PASSWORD}
+      - DB_NAME=hssdb
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "2905:2905/tcp"
+      - "2905:2905/udp"
+    command: ["python", "/app/src/map_sccp_server.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # CAMEL State Machine (SCP/CAMEL Call Control)
+  # ========================================================================
+  camel:
+    build:
+      context: .
+      dockerfile: docker/camel/Dockerfile
+    container_name: core-camel
+    restart: unless-stopped
+    depends_on:
+      hssdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      map-sccp:
+        condition: service_started
+    environment:
+      - CAMEL_GSM_SCF_ADDRESS=${CAMEL_GSM_SCF_ADDRESS:-scf.core.local}
+      - CAMEL_DEFAULT_PHASE=${CAMEL_DEFAULT_PHASE:-3}
+      - DB_HOST=hssdb
+      - DB_PORT=3306
+      - DB_USER=hss
+      - DB_PASSWORD=${HSS_DB_PASSWORD}
+      - DB_NAME=hssdb
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "2906:2906/tcp"
+      - "2906:2906/sctp"
+    command: ["python", "/app/src/camel_engine.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # OCS/Gy Client (Online Charging System - RFC 4006)
+  # ========================================================================
+  ocs:
+    build:
+      context: .
+      dockerfile: docker/ocs/Dockerfile
+    container_name: core-ocs
+    restart: unless-stopped
+    environment:
+      - OCS_ORIGIN_HOST=${OCS_ORIGIN_HOST:-ocs.core.local}
+      - OCS_ORIGIN_REALM=${OCS_ORIGIN_REALM:-core.local}
+      - OCS_VENDOR_ID=${OCS_VENDOR_ID:-10415}
+      - OCS_PRODUCT_NAME=${OCS_PRODUCT_NAME:-5G-Core-OCS}
+      - OCS_HOST=0.0.0.0
+      - OCS_PORT=${OCS_PORT:-3869}
+      - OCS_FAILURE_HANDLING=${OCS_FAILURE_HANDLING:-2}
+      - OCS_SESSION_TIMEOUT=${OCS_SESSION_TIMEOUT:-300}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "3869:3869/tcp"
+      - "3869:3869/sctp"
+    command: ["python", "/app/src/ocs_client.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
   # 5GC Control Plane (free5GC / Open5GS)
   # ========================================================================
   nrf:

@@ -22,6 +22,8 @@ from .models import (
     NetworkNode,
     # Batch
     BatchUpload, IMSIRange,
+    # UECM
+    UECMRegistration,
 )
 
 
@@ -244,3 +246,10 @@ class FullProfileSerializer(serializers.Serializer):
     supplementary_services = SupplementaryServiceSerializer(many=True, required=False)
     roaming_profiles = RoamingProfileSerializer(many=True, required=False)
     camel_profiles = CamelServiceProfileSerializer(many=True, required=False)
+
+
+# UECM Serializers
+class UECMRegistrationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UECMRegistration
+        fields = "__all__"

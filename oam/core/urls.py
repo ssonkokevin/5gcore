@@ -90,4 +90,9 @@ urlpatterns = [
     path("nudm-sdm/v2/<str:imsi>/sm-data/", views.NudmSmDataView.as_view(), name="nudm-sm-data"),
     path("nudm-sdm/v2/<str:imsi>/trace-data/", views.NudmTraceDataView.as_view(), name="nudm-trace-data"),
     path("nudm-sdm/v2/<str:imsi>/sms-data/", views.NudmSmsDataView.as_view(), name="nudm-sms-data"),
+
+    # UECM Registration
+    # ========================================================================
+    path("uecm/registrations/", views.UECMRegistrationListView.as_view(), name="uecm-registration-list"),
+    path("uecm/registrations/<str:imsi>/<str:access_type>/", views.UECMRegistrationDetailView.as_view(), name="uecm-registration-detail"),
 ]

@@ -26,6 +26,8 @@ from .models import (
     NetworkNode,
     # Batch
     BatchUpload, IMSIRange,
+    # UECM
+    UECMRegistration,
 )
 from .serializers import (
     # DRA
@@ -51,6 +53,8 @@ from .serializers import (
     BatchUploadSerializer, IMSIRangeSerializer, IMSIRangeCreateSerializer,
     # Full Profile
     FullProfileSerializer,
+    # UECM
+    UECMRegistrationSerializer,
 )
 
 
@@ -659,3 +663,23 @@ class NudmSmsDataView(APIView):
             return Response(resp.json(), status=resp.status_code)
         except requests.RequestException as e:
             return Response({"error": f"UDM service unavailable: {e}"}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+
+# ============================================================================
+# UECM Registration Views (Direct DB Access)
+# ============================================================================
+class UECMRegistrationListView(APIView):
+    def get(self, request):
+        queryset = UECMRegistration.objects.all()[:100]
+        serializer = UECMRegistrationSerializer(queryset, many=True)
+        return Response(serializer.data)
+
+
+class UECMRegistrationDetailView(APIView):
+    def get(self, request, imsi, access_type):
+        try:
+            reg = UECMRegistration.objects.get(imsi=imsi, access_type=access_type)
+        except UECMRegistration.DoesNotExist:
+            return Response({"error": "Not found"}, status=status.HTTP_404_NOT_FOUND)
+        serializer = UECMRegistrationSerializer(reg)
+        return Response(serializer.data)

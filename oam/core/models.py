@@ -785,3 +785,17 @@ class IMSIRange(models.Model):
     class Meta:
         db_table = "tbl_imsi_range"
         unique_together = [("mcc", "mnc", "imsi_start", "imsi_end")]
+
+
+class UECMRegistration(models.Model):
+    """UECM Registration Data per TS 29.503 Nudm_UECM"""
+    id = models.BigAutoField(primary_key=True)
+    imsi = models.CharField(max_length=15)
+    access_type = models.CharField(max_length=20, choices=[('3GPP', '3GPP'), ('non-3GPP', 'non-3GPP')])
+    registration_data = models.JSONField(blank=True, null=True)
+    registered_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "tbl_uecm_registration"
+        unique_together = [("imsi", "access_type")]
