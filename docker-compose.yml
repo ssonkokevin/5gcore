@@ -23,6 +23,28 @@ services:
     networks:
       - core-net
 
+  hssdb:
+    image: mariadb:10.6
+    container_name: core-hssdb
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: hssdb
+      MYSQL_USER: hss
+      MYSQL_PASSWORD: ${HSS_DB_PASSWORD}
+    volumes:
+      - core-hssdb-data:/var/lib/mysql
+      - ./database/hssdbInitial.sql:/docker-entrypoint-initdb.d/hssdbInitial.sql:ro
+    ports:
+      - "3307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+
   redis:
     image: redis:7-alpine
     container_name: core-redis
@@ -297,6 +319,37 @@ services:
         condition: service_healthy
       mongo:
         condition: service_healthy
+
+  # Custom UDM with Tri-Mode (5G/4G/3G/2G) + Batch Upload
+  custom-udm:
+    build:
+      context: .
+      dockerfile: docker/udm/Dockerfile
+    container_name: core-custom-udm
+    restart: unless-stopped
+    depends_on:
+      hssdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - UDM_PORT=8080
+      - DB_HOST=hssdb
+      - DB_PORT=3306
+      - DB_USER=hss
+      - DB_PASSWORD=${HSS_DB_PASSWORD}
+      - DB_NAME=hssdb
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./udm/src:/app/src
+    ports:
+      - "8080:8080/tcp"
+    command: ["python", "/app/src/udm_server.py"]
+    networks:
+      - core-net
 
   pcf:
     image: free5gc/pcf:v3.4.0
@@ -579,6 +632,7 @@ networks:
 
 volumes:
   core-db-data:
+  core-hssdb-data:
   core-redis-data:
   core-grafana-data:
   core-mongo-data:

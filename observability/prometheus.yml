@@ -49,10 +49,14 @@ scrape_configs:
       - targets: ["scp:3869"]
     metrics_path: "/metrics"
 
-  - job_name: "udm"
+  - job_name: "custom-udm"
     static_configs:
-      - targets: ["udm:8080"]
+      - targets: ["custom-udm:8080"]
     metrics_path: "/metrics"
+
+  - job_name: "hssdb"
+    static_configs:
+      - targets: ["hssdb:3306"]
 
   - job_name: "oam"
     static_configs:

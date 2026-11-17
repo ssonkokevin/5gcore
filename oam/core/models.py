@@ -1,6 +1,7 @@
 """
 OAM Core Models - 5G Core Network Management
 Maps to database schema from srg_db.sql (STP/DRA tables) and hssdbInitial.sql (UDM tables)
+Extended for 5G/4G/3G/2G tri-mode with full key hierarchy, batch provisioning
 """
 from django.db import models
 
@@ -235,20 +236,144 @@ class STPTranslate(STPView):
         unique_together = [("instance_id", "name")]
 
 
+# ============================================================================
+# UDM/HSS/HLR Tri-Mode Subscriber Models (hssdb database)
+# ============================================================================
 class Subscriber(models.Model):
     """UDM Subscriber model (from hssdbInitial.sql / protei-scp-platform)"""
-    imsi = models.CharField(max_length=20, primary_key=True)
-    msisdn = models.CharField(max_length=20, blank=True, null=True)
-    imei = models.CharField(max_length=20, blank=True, null=True)
-    authentication_key = models.CharField(max_length=64, blank=True, null=True)  # Ki
-    opc = models.CharField(max_length=64, blank=True, null=True)
-    network_access_mode = models.SmallIntegerField(default=0)
-    subscriber_status = models.SmallIntegerField(default=0)
+    imsi = models.CharField(max_length=15, primary_key=True)
+    msisdn = models.CharField(max_length=15, blank=True, null=True)
+    imei = models.CharField(max_length=15, blank=True, null=True)
+    
+    # 5G/4G Root Keys
+    k = models.CharField(max_length=32, blank=True, null=True, help_text="5G root key (K4) - 256-bit hex")
+    ki = models.CharField(max_length=32, blank=True, null=True, help_text="4G/3G/2G root key (Ki) - 128-bit hex")
+    
+    # OP/OPc
+    op = models.CharField(max_length=32, blank=True, null=True, help_text="OP (Operator Variant) - 128-bit hex")
+    opc = models.CharField(max_length=32, blank=True, null=True, help_text="OPc (derived) - 128-bit hex")
+    
+    # Sequence & AMF
+    sqn = models.BigIntegerField(default=0, help_text="Sequence number for AKA")
+    amf = models.CharField(max_length=8, default="8000", help_text="Authentication Management Field (hex)")
+    
+    # Derived 5G Key Hierarchy
+    k_asme = models.CharField(max_length=32, blank=True, null=True, help_text="K_ASME")
+    k_seaf = models.CharField(max_length=32, blank=True, null=True, help_text="K_SEAF")
+    k_ausf = models.CharField(max_length=32, blank=True, null=True, help_text="K_AUSF")
+    
+    # 2G/3G Cipher & Auth
+    kc = models.CharField(max_length=16, blank=True, null=True, help_text="Kc (2G/3G Cipher Key) - 64-bit hex")
+    sres = models.CharField(max_length=8, blank=True, null=True, help_text="SRES (2G/3G Auth Response) - 32-bit hex")
+    
+    # Network Access
+    network_access_mode = models.SmallIntegerField(default=2, help_text="0=GPRS,1=CS,2=Both,3=5G")
+    subscriber_status = models.SmallIntegerField(default=0, help_text="0=Active,1=Barred,2=Suspended")
     roaming_restricted = models.BooleanField(default=False)
-    ambr_ul = models.CharField(max_length=20, blank=True, null=True)
-    ambr_dl = models.CharField(max_length=20, blank=True, null=True)
+    
+    # QoS
+    ambr_ul = models.CharField(max_length=32, blank=True, null=True)
+    ambr_dl = models.CharField(max_length=32, blank=True, null=True)
+    
+    # Batch Provisioning
+    batch_id = models.CharField(max_length=64, blank=True, null=True)
+    imsi_range_start = models.CharField(max_length=15, blank=True, null=True)
+    imsi_range_end = models.CharField(max_length=15, blank=True, null=True)
+    
+    # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = "tbl_subscriber"
+        indexes = [
+            models.Index(fields=["batch_id"]),
+            models.Index(fields=["imsi_range_start", "imsi_range_end"]),
+        ]
+
+
+class AuthVector(models.Model):
+    """Authentication vectors (pre-computed)"""
+    imsi = models.OneToOneField(Subscriber, on_delete=models.CASCADE, primary_key=True, db_column="imsi")
+    rand = models.CharField(max_length=32, blank=True, null=True)
+    autn = models.CharField(max_length=32, blank=True, null=True)
+    res = models.CharField(max_length=16, blank=True, null=True)
+    xres = models.CharField(max_length=32, blank=True, null=True)
+    ck = models.CharField(max_length=32, blank=True, null=True)
+    ik = models.CharField(max_length=32, blank=True, null=True)
+    k_asme = models.CharField(max_length=32, blank=True, null=True)
+    k_seaf = models.CharField(max_length=32, blank=True, null=True)
+    k_ausf = models.CharField(max_length=32, blank=True, null=True)
+    generated_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        db_table = "tbl_auth_vector"
+
+
+class Roaming(models.Model):
+    """Roaming restrictions per visited PLMN"""
+    imsi = models.ForeignKey(Subscriber, on_delete=models.CASCADE, db_column="imsi")
+    visited_plmn = models.CharField(max_length=6)
+    roaming_allowed = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "tbl_roaming"
+        unique_together = [("imsi", "visited_plmn")]
+
+
+class ServiceProfile(models.Model):
+    """Service control profile (SCP linkage)"""
+    imsi = models.OneToOneField(Subscriber, on_delete=models.CASCADE, primary_key=True, db_column="imsi")
+    service_key = models.CharField(max_length=64, blank=True, null=True)
+    scp_trigger = models.CharField(max_length=64, blank=True, null=True)
+    camel_phase = models.SmallIntegerField(default=1)
+
+    class Meta:
+        db_table = "tbl_service_profile"
+
+
+class BatchUpload(models.Model):
+    """Batch upload tracking & audit"""
+    id = models.BigAutoField(primary_key=True)
+    batch_id = models.CharField(max_length=64, unique=True)
+    filename = models.CharField(max_length=255, blank=True, null=True)
+    total_records = models.PositiveIntegerField(default=0)
+    successful_records = models.PositiveIntegerField(default=0)
+    failed_records = models.PositiveIntegerField(default=0)
+    status = models.CharField(
+        max_length=20,
+        choices=[('pending', 'Pending'), ('processing', 'Processing'), ('completed', 'Completed'), ('failed', 'Failed')],
+        default='pending'
+    )
+    error_log = models.JSONField(blank=True, null=True)
+    created_by = models.CharField(max_length=64, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        db_table = "tbl_batch_upload"
+
+
+class IMSIRange(models.Model):
+    """IMSI range management for allocations"""
+    id = models.BigAutoField(primary_key=True)
+    range_name = models.CharField(max_length=64, unique=True)
+    mcc = models.CharField(max_length=3)
+    mnc = models.CharField(max_length=3)
+    msisdn_prefix = models.CharField(max_length=10, blank=True, null=True)
+    imsi_start = models.CharField(max_length=15)
+    imsi_end = models.CharField(max_length=15)
+    next_imsi = models.CharField(max_length=15)
+    allocated_count = models.BigIntegerField(default=0)
+    total_count = models.BigIntegerField(default=0)
+    status = models.CharField(
+        max_length=20,
+        choices=[('available', 'Available'), ('exhausted', 'Exhausted'), ('reserved', 'Reserved')],
+        default='available'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "tbl_imsi_range"
+        unique_together = [("mcc", "mnc", "imsi_start", "imsi_end")]

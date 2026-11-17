@@ -24,4 +24,16 @@ urlpatterns = [
     path("subscribers/", views.SubscriberListView.as_view(), name="subscriber-list"),
     path("subscribers/<str:imsi>/", views.SubscriberDetailView.as_view(), name="subscriber-detail"),
     path("subscribers/<str:imsi>/auth-vector/", views.SubscriberAuthVectorView.as_view(), name="subscriber-auth-vector"),
+    
+    # Batch Upload
+    path("subscribers/batch/", views.BatchUploadView.as_view(), name="subscriber-batch-upload"),
+    path("batches/<str:batch_id>/", views.BatchStatusView.as_view(), name="batch-status"),
+    
+    # IMSI Range Management
+    path("imsi-ranges/", views.IMSIRangeListView.as_view(), name="imsi-range-list"),
+    path("imsi-ranges/allocate/", views.IMSIAllocateView.as_view(), name="imsi-allocate"),
+    
+    # Roaming & Service Profile
+    path("subscribers/<str:imsi>/roaming/", views.RoamingListView.as_view(), name="subscriber-roaming"),
+    path("subscribers/<str:imsi>/service-profile/", views.ServiceProfileView.as_view(), name="subscriber-service-profile"),
 ]
