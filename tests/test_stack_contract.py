@@ -151,6 +151,33 @@ class TestStaticContracts(unittest.TestCase):
             if str(svc.get("image", "")).startswith("free5gc/"):
                 self.assertIn("free5gc", svc.get("profiles") or [], f"{name} is always-on")
 
+    def test_udr_fronts_the_authentication_subscription(self):
+        services = load_compose()["services"]
+        udr = services["custom-udr"]
+        self.assertIn("UDR_PORT=8006", udr["environment"])
+        self.assertEqual(udr["ports"], ["${UDR_HOST_PORT:-8006}:8006/tcp"])
+        self.assertIn("healthcheck", udr)
+        self.assertIn("NRF_ADDR=custom-nrf", udr["environment"])
+        self.assertTrue((ROOT / "docker" / "udr" / "Dockerfile").exists())
+
+        udm = services["custom-udm"]
+        self.assertIn("UDR_ADDR=custom-udr", udm["environment"])
+        self.assertIn("custom-udr", udm["depends_on"])
+
+    def test_udm_does_not_advance_sqn_in_sql(self):
+        source = (ROOT / "udm" / "src" / "udm_server.py").read_text(encoding="utf-8")
+        self.assertNotIn(
+            "UPDATE tbl_subscriber SET sqn=",
+            source,
+            "SQN must be advanced through the UDR's conditional PATCH",
+        )
+        self.assertIn("_generate_with_sqn_cas", source)
+
+    def test_udr_is_a_conditional_store(self):
+        source = (ROOT / "udr" / "src" / "udr_server.py").read_text(encoding="utf-8")
+        for token in ("If-Match", "PRECONDITION_REQUIRED", "FOR UPDATE", "AND sqn="):
+            self.assertIn(token, source, f"UDR lost its conditional-write guard: {token}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

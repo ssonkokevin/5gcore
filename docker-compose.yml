@@ -18,6 +18,7 @@
 #   3873  pcf Gx ${PCF_GX_HOST_PORT}          3874  pcf Gy ${PCF_GY_HOST_PORT}
 #   8000  custom-nrf ${NRF_HOST_PORT}         8002  custom-smf http ${SMF_HOST_PORT}
 #   8004  custom-pcf http ${PCF_HOST_PORT}    8007  custom-udm ${CUSTOM_UDM_HOST_PORT}
+#   8006  custom-udr ${UDR_HOST_PORT}
 #   8081  oam ${OAM_HOST_PORT}                8001  custom-amf http ${AMF_HOST_PORT}
 #   8003  custom-lmf ${LMF_HOST_PORT}         8075  custom-mme http ${MME_HTTP_HOST_PORT}
 #   3875  custom-mme SLg ${MME_SLG_HOST_PORT} 8082  gmlc ${GMLC_HOST_PORT}
@@ -418,6 +419,45 @@ services:
     networks:
       - core-net
 
+  custom-udr:
+    build:
+      context: .
+      dockerfile: docker/udr/Dockerfile
+    container_name: core-custom-udr
+    restart: unless-stopped
+    depends_on:
+      hssdb:
+        condition: service_healthy
+      custom-nrf:
+        condition: service_healthy
+    environment:
+      - UDR_PORT=8006
+      - DB_HOST=hssdb
+      - DB_PORT=3306
+      - DB_USER=hss
+      - DB_PASSWORD=${HSS_DB_PASSWORD:-change-me}
+      - DB_NAME=hssdb
+      - NRF_ADDR=custom-nrf
+      - NRF_PORT=${CUSTOM_NRF_PORT:-8000}
+      - NRF_HEARTBEAT_TIMER=${NRF_HEARTBEAT_TIMER:-30}
+      - UDR_NF_INSTANCE_ID=${UDR_NF_INSTANCE_ID:-udr-01}
+      - UDR_PUBLIC_HOST=${UDR_PUBLIC_HOST:-udr.core.local}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./udr/src:/app/src
+      - ./corelib:/app/corelib:ro
+    ports:
+      - "${UDR_HOST_PORT:-8006}:8006/tcp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8006/health',timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    command: ["python", "/app/src/udr_server.py"]
+    networks:
+      - core-net
+
   custom-udm:
     build:
       context: .
@@ -430,6 +470,8 @@ services:
       redis:
         condition: service_healthy
       custom-nrf:
+        condition: service_healthy
+      custom-udr:
         condition: service_healthy
     environment:
       - UDM_PORT=8080
@@ -447,6 +489,9 @@ services:
       - PLMN_MNC=${PLMN_MNC:-020}
       - NRF_ADDR=custom-nrf
       - NRF_PORT=8000
+      # Authentication subscriptions and SQN are owned by the UDR.
+      - UDR_ADDR=custom-udr
+      - UDR_PORT=8006
       # SUCI de-concealment keys stay in this container; never log them.
       - SUCI_PROFILES=${SUCI_PROFILES:-}
       - SUCI_PROFILE_A_PRIVATE_KEY=${SUCI_PROFILE_A_PRIVATE_KEY:-}

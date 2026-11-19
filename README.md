@@ -11,6 +11,7 @@ Open-source 5G SA core architecture template with STP/DRA/SCP/UDM, PCF/SMF/UPF b
 | SCP | Python CAMEL/INAP (stub) | 3869, 2906 | Service control plane (SCP-IN / CAMEL context) |
 | NRF | Python, Redis/memory | 8000 | NF registry and discovery (TS 29.510 subset) |
 | UDM | REST + MariaDB | 8007 (container 8080) | Tri-mode subscriber data, Milenage vectors, SUCI Profiles A/B |
+| UDR | REST + MariaDB | 8006 | Nudr authentication subscription with ETag/If-Match conditional writes |
 | PCF/PCRF | Python stub + PCC configs | 7777, 3873/3874 | Policy/charging scaffold (Npcf/Gx/Gy template) |
 | SMF | Python stub + PFCP profile | 8002, 8806 | Session control scaffold (N4 PFCP) |
 | UPF/PGW | Python datapath stub + DPE/CPE configs | 2152, 8805, 42050 | Unified PGW/UPF datapath scaffold |

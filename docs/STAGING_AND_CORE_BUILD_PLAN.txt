@@ -319,8 +319,9 @@
      upf            8805   udp    N4 (PFCP)
      upf            2152   udp    N3 (GTP-U)
      ausf           8008   tcp    SBI (Nausf)
-     udm (f5gc)     8006   tcp    SBI (Nudm)
+     udm (f5gc)     18083  tcp    SBI (Nudm) - reference profile only
      custom-udm     8007   tcp    SBI plus REST admin
+     custom-udr     8006   tcp    Nudr (TS 29.504), authentication subscription
      pcf (f5gc)     8004   tcp    SBI (Npcf)
      custom-pcf     7777   tcp    N7/N15/N5
      chf            8005   tcp    SBI (Nchf)

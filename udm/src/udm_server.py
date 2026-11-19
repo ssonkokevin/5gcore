@@ -55,6 +55,7 @@ _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(_SRC_DIR))
 sys.path.insert(0, _SRC_DIR)
 import suci as suci_lib  # noqa: E402  (TS 33.501 Annex C de-concealment)
+from corelib.http import TransportError  # noqa: E402
 from corelib.milenage import (  # noqa: E402
     CRYPTO_BACKEND,
     AutsVerificationError,
@@ -62,6 +63,7 @@ from corelib.milenage import (  # noqa: E402
     derive_opc as _derive_opc,
     plmn_id,
 )
+from corelib.udr_client import UdrClient, UdrError  # noqa: E402
 
 logger = logging.getLogger("udm")
 
@@ -122,6 +124,13 @@ def serving_network_name() -> str:
     )
 
 
+# Authentication subscriptions and SQN live behind the UDR (TS 29.504).
+UDR_URL = os.getenv("UDR_URL") or (
+    f"http://{os.getenv('UDR_ADDR', 'custom-udr')}:{os.getenv('UDR_PORT', '8006')}"
+)
+udr = UdrClient(UDR_URL, timeout=float(os.getenv("UDR_TIMEOUT", "3")))
+
+
 # ============================================================================
 # DB / Redis Helpers
 # ============================================================================
@@ -131,6 +140,75 @@ def get_db():
 
 def get_redis():
     return redis.Redis(**REDIS_CONFIG)
+
+
+def _udr_credentials(imsi: str) -> Dict[str, Any]:
+    """Read the authentication subscription and its ETag from the UDR."""
+    try:
+        got = udr.get_authentication_subscription(f"imsi-{imsi}")
+    except TransportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"cause": "UDR_UNAVAILABLE", "detail": str(exc)},
+        ) from exc
+    except UdrError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"cause": "UDR_ERROR", "udr_status": exc.status},
+        ) from exc
+    if got is None:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    etag, body = got
+    return {
+        "etag": etag,
+        "k": (body.get("permanentKey") or {}).get("permanentKeyValue"),
+        "ki": body.get("ki"),
+        "opc": (body.get("opc") or {}).get("opcValue"),
+        "op": (body.get("milenage") or {}).get("op"),
+        "amf": body.get("authenticationManagementField") or "8000",
+        "sqn": int(body.get("sequenceNumber") or "0", 16),
+    }
+
+
+def _commit_sqn(imsi: str, etag: str, new_sqn: int) -> bool:
+    """Conditional SQN advance; False means another writer won the race."""
+    try:
+        status, _ = udr.patch_sequence_number(f"imsi-{imsi}", f"{new_sqn:012X}", etag)
+    except TransportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"cause": "UDR_UNAVAILABLE", "detail": str(exc)},
+        ) from exc
+    if status == 200:
+        return True
+    if status == 412:
+        return False
+    if status == 404:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    raise HTTPException(
+        status_code=502,
+        detail={"cause": "UDR_ERROR", "udr_status": status},
+    )
+
+
+def _generate_with_sqn_cas(imsi: str, build):
+    """Build a vector from the current SQN, then advance SQN conditionally.
+
+    build(creds) returns (payload, new_sqn). If the conditional PATCH answers
+    412, another NF advanced SQN after our read: the vector built from the
+    stale SQN is discarded and build() runs once more on fresh data. Two
+    attempts, then 409 — a vector from a stale SQN is never returned.
+    """
+    for attempt in (1, 2):
+        creds = _udr_credentials(imsi)
+        payload, new_sqn = build(creds)
+        if _commit_sqn(imsi, creds["etag"], new_sqn):
+            return payload
+        logger.warning("SQN contention for %s (attempt %d); rebuilding vector", imsi, attempt)
+    raise HTTPException(
+        status_code=409,
+        detail={"cause": "SQN_CONTENTION", "detail": "SQN changed twice; retry the request"},
+    )
 
 
 def dict_row(cur, row):
@@ -658,7 +736,8 @@ def health():
         "version": "3.0.0",
         "modes": ["5G", "4G", "3G", "2G"],
         "crypto": "milenage",
-        "crypto_library": "pycryptodome",
+        "crypto_library": CRYPTO_BACKEND,
+        "authentication_data": {"source": "udr", "url": UDR_URL},
         "suci_profiles": _suci_profile_summary(),
         "specs": ["TS 29.503", "TS 29.272", "TS 29.228", "TS 33.501", "TS 33.102", "TS 23.008"]
     }
@@ -846,38 +925,41 @@ def get_full_profile(imsi: str):
 # ============================================================================
 @app.get("/subscribers/{imsi}/auth-vector", response_model=AuthVectorResponse)
 def get_auth_vector(imsi: str, rand: Optional[str] = None, algorithm: str = "milenage"):
-    """Generate authentication vector for 5G/4G/3G/2G AKA."""
-    conn = get_db()
-    try:
-        cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT * FROM tbl_subscriber WHERE imsi=%s", (imsi,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Subscriber not found")
-        
-        # Generate RAND if not provided
-        rand_bytes = bytes.fromhex(rand) if rand else secrets.token_bytes(16)
-        rand_hex = rand_bytes.hex().upper()
-        
-        if not row.get("opc"):
+    """Generate an authentication vector for 5G/4G/3G/2G AKA.
+
+    Credentials and SQN are read from the UDR and the SQN is advanced with a
+    conditional PATCH (TS 29.504), so a concurrent consumer cannot cause a
+    lost update or make us return a vector built on a stale SQN.
+    """
+    if rand:
+        try:
+            bytes.fromhex(rand)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="RAND_MALFORMED: rand must be hex")
+
+    def build(creds):
+        if not creds["opc"]:
             raise HTTPException(status_code=400, detail="AUTH_CREDENTIALS_MISSING: opc not provisioned")
-        if not row.get("k") and not row.get("ki"):
-            raise HTTPException(status_code=400, detail="AUTH_CREDENTIALS_MISSING: neither K nor Ki provisioned")
+        if not creds["k"] and not creds["ki"]:
+            raise HTTPException(
+                status_code=400, detail="AUTH_CREDENTIALS_MISSING: neither K nor Ki provisioned"
+            )
+
+        rand_bytes = bytes.fromhex(rand) if rand else secrets.token_bytes(16)
+        amf_bytes = bytes.fromhex(creds["amf"])
+        sqn = creds["sqn"]
 
         # Populated only by the credential path that matches this subscriber.
         autn = res = xres = xres_star = ""
         ck = ik = k_asme = k_seaf = k_ausf = k_amf = ""
         sres = kc = ""
-        
-        amf_bytes = bytes.fromhex(row["amf"])
-        sqn = row["sqn"]
-        
+
         # 5G AKA (if K present): UDM returns the HE AV only — RAND, AUTN,
         # XRES* and KAUSF. KSEAF/KAMF belong to the AUSF (TS 33.501 §6.1.3.2).
-        if row.get("k") and row.get("opc"):
-            crypto = get_crypto(row["opc"])
+        if creds["k"]:
+            crypto = get_crypto(creds["opc"])
             av = crypto.generate_5g_he_av(
-                bytes.fromhex(row["k"]), sqn, amf_bytes,
+                bytes.fromhex(creds["k"]), sqn, amf_bytes,
                 serving_network_name(), rand=rand_bytes,
             )
             autn = av["autn"].hex().upper()
@@ -889,10 +971,10 @@ def get_auth_vector(imsi: str, rand: Optional[str] = None, algorithm: str = "mil
             k_ausf = av["k_ausf"].hex().upper()
 
         # 4G AKA (if Ki present, no 5G)
-        elif row.get("ki") and row.get("opc"):
-            crypto = get_crypto(row["opc"])
+        elif creds["ki"]:
+            crypto = get_crypto(creds["opc"])
             av = crypto.generate_eps_av(
-                bytes.fromhex(row["ki"]), sqn, amf_bytes,
+                bytes.fromhex(creds["ki"]), sqn, amf_bytes,
                 sn_id=serving_plmn(), rand=rand_bytes,
             )
             autn = av["autn"].hex().upper()
@@ -903,28 +985,15 @@ def get_auth_vector(imsi: str, rand: Optional[str] = None, algorithm: str = "mil
             k_asme = av["k_asme"].hex().upper()
 
         # 2G/3G (if Ki present)
-        if row.get("ki"):
-            if not row.get("opc"):
-                raise HTTPException(
-                    status_code=400,
-                    detail="AUTH_CREDENTIALS_MISSING: opc not provisioned",
-                )
-            crypto = get_crypto(row["opc"])
-            av = crypto.generate_2g3g_av(bytes.fromhex(row["ki"]), rand=rand_bytes)
+        if creds["ki"]:
+            crypto = get_crypto(creds["opc"])
+            av = crypto.generate_2g3g_av(bytes.fromhex(creds["ki"]), rand=rand_bytes)
             sres = av["sres"].hex().upper()
             kc = av["kc"].hex().upper()
-        
-        # Update SQN
-        new_sqn = sqn + 1
-        cur.execute("UPDATE tbl_subscriber SET sqn=%s WHERE imsi=%s", (new_sqn, imsi))
-        conn.commit()
-        
-        r = get_redis()
-        r.delete(f"udm:subscriber:{imsi}")
-        
-        return AuthVectorResponse(
+
+        payload = AuthVectorResponse(
             imsi=imsi,
-            rand=rand_hex,
+            rand=rand_bytes.hex().upper(),
             autn=autn,
             res=res,
             xres=xres,
@@ -938,8 +1007,11 @@ def get_auth_vector(imsi: str, rand: Optional[str] = None, algorithm: str = "mil
             sres=sres,
             kc=kc,
         )
-    finally:
-        conn.close()
+        return payload, sqn + 1
+
+    result = _generate_with_sqn_cas(imsi, build)
+    get_redis().delete(f"udm:subscriber:{imsi}")
+    return result
 
 
 @app.post("/subscribers/{imsi}/auth-vector/generate", response_model=AuthVectorResponse)
@@ -1105,25 +1177,20 @@ class GenerateAuthDataResponse(BaseModel):
 @app.post("/nudm-ueau/v1/{supi_or_suci}/security-information/generate-auth-data", response_model=GenerateAuthDataResponse)
 def generate_auth_data(supi_or_suci: str, req: GenerateAuthDataRequest):
     """Generate 5G Authentication Data (TS 29.503 §5.2.2.1).
-    
-    AUSF calls this to get 5G AKA vectors. Handles SUCI de-concealment.
+
+    AUSF calls this to get 5G AKA vectors. Handles SUCI de-concealment. The
+    authentication subscription is read from the UDR and the SQN advance is a
+    conditional PATCH, so a concurrent ARPF consumer cannot lose an SQN.
     """
     imsi = resolve_identity(supi_or_suci)
-    
-    conn = get_db()
-    try:
-        cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT * FROM tbl_subscriber WHERE imsi=%s", (imsi,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Subscriber not found")
-        
-        if not row.get("k") or not row.get("opc"):
+
+    def build(creds):
+        if not creds["k"] or not creds["opc"]:
             raise HTTPException(status_code=400, detail="5G credentials not provisioned")
 
-        crypto = get_crypto(row["opc"])
-        k_bytes = bytes.fromhex(row["k"])
-        sqn = row["sqn"]
+        crypto = get_crypto(creds["opc"])
+        k_bytes = bytes.fromhex(creds["k"])
+        sqn = creds["sqn"]
 
         # AUTS resynchronisation (TS 33.102 §6.3.3, TS 29.503 §5.2.2.1).
         if req.resynchronization_info:
@@ -1144,7 +1211,7 @@ def generate_auth_data(supi_or_suci: str, req: GenerateAuthDataRequest):
                 )
 
         av = crypto.generate_5g_he_av(
-            k_bytes, sqn, bytes.fromhex(row["amf"]),
+            k_bytes, sqn, bytes.fromhex(creds["amf"]),
             req.serving_network_name,
         )
         auth_vector = AuthenticationVector5G(
@@ -1153,21 +1220,17 @@ def generate_auth_data(supi_or_suci: str, req: GenerateAuthDataRequest):
             autn=av["autn"].hex().upper(),
             kausf=av["k_ausf"].hex().upper()
         )
-
-        # SQN advances past the (possibly resynchronised) value just used.
-        new_sqn = sqn + 1
-        cur.execute("UPDATE tbl_subscriber SET sqn=%s WHERE imsi=%s", (new_sqn, imsi))
-        conn.commit()
-        
-        r = get_redis()
-        r.delete(f"udm:subscriber:{imsi}")
-        
-        return GenerateAuthDataResponse(
-            auth_vectors=[auth_vector],
-            supported_features=req.supported_features
+        return (
+            GenerateAuthDataResponse(
+                auth_vectors=[auth_vector],
+                supported_features=req.supported_features,
+            ),
+            sqn + 1,
         )
-    finally:
-        conn.close()
+
+    result = _generate_with_sqn_cas(imsi, build)
+    get_redis().delete(f"udm:subscriber:{imsi}")
+    return result
 
 
 class HssAvRequest(BaseModel):
@@ -1184,43 +1247,36 @@ class HssAvResponse(BaseModel):
 @app.post("/nudm-ueau/v1/{supi}/hss-security-information/{hss_auth_type}/generate-av", response_model=HssAvResponse)
 def generate_hss_av(supi: str, hss_auth_type: str, req: HssAvRequest):
     """HSS requests EPS/IMS authentication vectors (GetHssAv, TS 29.503 §5.2.2.4).
-    
+
     Called by HSS for S6a/Cx interworking. Supports:
     - eps-aka: EPS AKA (KASME, XRES, RAND, AUTN, CK, IK)
     - ims-aka: IMS AKA (CK, IK, XRES, RAND, AUTN)
     - eap-aka / eap-aka-prime: EAP-AKA / EAP-AKA'
     - gba-aka: GBA AKA
     """
-    conn = get_db()
-    try:
-        cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT * FROM tbl_subscriber WHERE imsi=%s", (supi,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Subscriber not found")
-        
-        if not row.get("ki") or not row.get("opc"):
-            raise HTTPException(status_code=400, detail="4G/3G/2G credentials not provisioned")
-        
-        if hss_auth_type == "eap-aka-prime":
-            raise HTTPException(
-                status_code=501,
-                detail=(
-                    "EAP_AKA_PRIME_NOT_IMPLEMENTED: CK'/IK' derivation (TS 33.402) "
-                    "is not built; refusing to return placeholder vectors"
-                ),
-            )
+    if hss_auth_type == "eap-aka-prime":
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "EAP_AKA_PRIME_NOT_IMPLEMENTED: CK'/IK' derivation (TS 33.402) "
+                "is not built; refusing to return placeholder vectors"
+            ),
+        )
 
-        crypto = get_crypto(row["opc"])
-        ki_bytes = bytes.fromhex(row["ki"])
-        amf_bytes = bytes.fromhex(row["amf"])
+    def build(creds):
+        if not creds["ki"] or not creds["opc"]:
+            raise HTTPException(status_code=400, detail="4G/3G/2G credentials not provisioned")
+
+        crypto = get_crypto(creds["opc"])
+        ki_bytes = bytes.fromhex(creds["ki"])
+        amf_bytes = bytes.fromhex(creds["amf"])
 
         auth_vectors = []
         for i in range(req.num_vectors):
             # Each vector must use its own SQN and its own RAND, and the RAND
             # returned in the response must be the one inside AUTN/XRES.
             av = crypto.generate_eps_av(
-                ki_bytes, row["sqn"] + i, amf_bytes,
+                ki_bytes, creds["sqn"] + i, amf_bytes,
                 sn_id=serving_plmn(), rand=secrets.token_bytes(16),
             )
             vector = {
@@ -1239,18 +1295,14 @@ def generate_hss_av(supi: str, hss_auth_type: str, req: HssAvRequest):
                 vector["av_type"] = "GBA_AKA"
             auth_vectors.append(vector)
 
-        cur.execute(
-            "UPDATE tbl_subscriber SET sqn=%s WHERE imsi=%s",
-            (row["sqn"] + req.num_vectors, supi),
+        return (
+            HssAvResponse(auth_vectors=auth_vectors, supported_features=req.supported_features),
+            creds["sqn"] + req.num_vectors,
         )
-        
-        conn.commit()
-        r = get_redis()
-        r.delete(f"udm:subscriber:{supi}")
-        
-        return HssAvResponse(auth_vectors=auth_vectors, supported_features=req.supported_features)
-    finally:
-        conn.close()
+
+    result = _generate_with_sqn_cas(supi, build)
+    get_redis().delete(f"udm:subscriber:{supi}")
+    return result
 
 
 @app.post("/nudm-ueau/v1/{supi}/auth-events")

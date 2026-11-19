@@ -101,7 +101,7 @@ signalling.**
 | `Nudm_EE`, `_PP`, `_NIDDAU`, `_SSAU`, `_RSDS` | Built | API-level |
 | Subscriber/provisioning API | Built | ~130 routes, batch upload, IMSI ranges, EPS/5G/IMS subscription, APN, CAMEL, roaming |
 | EAP-AKA′ (CK′/IK′) | **Absent** | Returns `501 EAP_AKA_PRIME_NOT_IMPLEMENTED` |
-| UDR split (`Nudr`) | **Absent** | UDM writes MariaDB directly; no separate UDR NF |
+| UDR split (`Nudr`) | Built (auth only) | `custom-udr` on 8006 serves the authentication subscription with strong ETags and conditional PUT/PATCH; the UDM reads credentials and advances SQN only through it. Other Nudr resources are not mounted |
 | SIDF / NAI SUCI | Partial | A/B only; NAI SUCI returns `SUCI_UNSUPPORTED` |
 | `Nudm_MT` (SMS routing) | Partial | API present; transport to SMSF/IP-SM-GW is not built |
 | AUSF role | **Absent as an NF** | UDM serves `generate-auth-data` directly; the AMF has no AUSF to call |
@@ -113,7 +113,7 @@ it from a UE until the AMF speaks NAS.
 
 ## 2. True state of every default-profile service
 
-Default profile = 24 services. `profiles: ["free5gc"]` = 9 upstream reference
+Default profile = 25 services. `profiles: ["free5gc"]` = 9 upstream reference
 services, never started with the custom stack.
 
 | # | Service | Ports (host) | State | One-line truth |
@@ -130,20 +130,21 @@ services, never started with the custom stack.
 | 10 | `ocs` | 3870 | Partial | Gy CCR-I/U/T client; no real CHF |
 | 11 | `scp` | 3871 / 2908 | Partial | CAMEL/INAP service logic; no SBI SCP role |
 | 12 | `hss` | 8090 | Built | Nhss SBI (TS 29.563) + tri-mode subscriber store |
-| 13 | `custom-udm` | 8007 | Built | See §1.4 |
-| 14 | `custom-pcf` | 8004, 3873, 3874 | Built | N7 policy decisions from JSON profiles; no N15/CHF |
-| 15 | `custom-smf` | 8002, 8806 | Partial | N11-style HTTP + real PFCP encode + GTPv2-C server; N4 peer is a stub; GTP-C 2123 not published |
-| 16 | `custom-upf` | 2152, 8805, 42050 | **Stub** | Logs `UPF STUB` at start; receives UDP and forwards nothing |
-| 17 | `gmlc` | 8082 | Partial | Front end only; see §1.1 |
-| 18 | `oam` | 8081 | Partial | Django O&M shell; no NF lifecycle control |
-| 19 | `oam-frontend` | 3001 | Built | Static UI |
-| 20 | `prometheus` | 9090 | Built | Scrape config only |
-| 21 | `grafana` | 3000 | Built | Dashboards |
-| 22 | `custom-amf` | 8001 | **Partial** | Namf_Location proxy to LMF; **no N2/NGAP, no NAS, no attach** |
-| 23 | `custom-lmf` | 8003 | Partial | Forwarder; no measurement source |
-| 24 | `custom-mme` | 3875, 8075 | Stub | Diameter SLg only; PLR answered `5012`; no S1AP/S11/S6a/SGs |
+| 13 | `custom-udr` | 8006 | Built | Nudr authentication subscription (ETag/If-Match, CAS SQN); other Nudr resources absent |
+| 14 | `custom-udm` | 8007 | Built | See §1.4 |
+| 15 | `custom-pcf` | 8004, 3873, 3874 | Built | N7 policy decisions from JSON profiles; no N15/CHF |
+| 16 | `custom-smf` | 8002, 8806 | Partial | N11-style HTTP + real PFCP encode + GTPv2-C server; N4 peer is a stub; GTP-C 2123 not published |
+| 17 | `custom-upf` | 2152, 8805, 42050 | **Stub** | Logs `UPF STUB` at start; receives UDP and forwards nothing |
+| 18 | `gmlc` | 8082 | Partial | Front end only; see §1.1 |
+| 19 | `oam` | 8081 | Partial | Django O&M shell; no NF lifecycle control |
+| 20 | `oam-frontend` | 3001 | Built | Static UI |
+| 21 | `prometheus` | 9090 | Built | Scrape config only |
+| 22 | `grafana` | 3000 | Built | Dashboards |
+| 23 | `custom-amf` | 8001 | **Partial** | Namf_Location proxy to LMF; **no N2/NGAP, no NAS, no attach** |
+| 24 | `custom-lmf` | 8003 | Partial | Forwarder; no measurement source |
+| 25 | `custom-mme` | 3875, 8075 | Stub | Diameter SLg only; PLR answered `5012`; no S1AP/S11/S6a/SGs |
 
-Absent 5G NFs: **AUSF, UDR, NSSF, CHF, SMSF, BSF, NWDAF, EIR, SEPP.**
+Absent 5G NFs: **AUSF, NSSF, CHF, SMSF, BSF, NWDAF, EIR, SEPP.**
 Absent EPC/2G/3G NFs: **SGW, PGW, SGSN, GGSN, MSC/MGW, E-SMLC, SMSC.**
 Absent Phase 2: **EIR, SMSC/SMSF, IMS (P/I/S-CSCF, MGCF, BGCF).**
 
@@ -161,7 +162,7 @@ Do this before writing new protocol code.
 | P0-4 | Decide the single-IP strategy (see §9.1) | GTP-U and Diameter cannot be multiply-bound on one IP | Open — operator decision |
 | P0-5 | CI: GitHub Actions running `check_stack.py`, `unittest discover`, and `docker compose config` on every push | 44 tests exist but nothing enforces them | Done — `.github/workflows/ci.yml` (+ shell syntax and secret scan) |
 
-**Done when:** a clean clone on the target VM reaches `docker compose ps` with 24
+**Done when:** a clean clone on the target VM reaches `docker compose ps` with 25
 services healthy, and CI is green on `master`.
 
 ---
@@ -211,8 +212,12 @@ AUSF rather than UDM.
 
 ### WP1.4 — UDM / UDR
 
-- Optional but recommended: extract UDR (`Nudr`, TS 29.504) so subscriber data
-  has the 3GPP boundary and can be shared with PCF/CHF.
+- UDR (`Nudr`, TS 29.504) is extracted for the authentication subscription:
+  credentials, AMF and SQN, with strong ETags and conditional PUT/PATCH. The
+  UDM's three vector paths and the HSS vector path read and advance through it.
+- Remaining: move the other Nudr resources (access-and-mobility, session
+  management, policy data) behind the UDR so PCF/SMF stop reading `hssdb`
+  directly.
 - Complete SIDF (SUCI scheme 0/NAI) or document NAI as out of scope.
 - `Nudm_MT` transport once SMSF exists (Phase 2).
 
@@ -380,7 +385,6 @@ Free today and recommended for the new NFs:
 | NF | Host port |
 |---|---|
 | AUSF | 8005/tcp |
-| UDR (if split) | 8006/tcp |
 | NSSF | 8008/tcp |
 | CHF | 8009/tcp |
 | SMSF | 8010/tcp |
