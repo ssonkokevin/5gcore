@@ -23,6 +23,8 @@ except ImportError:
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPOSE = ROOT / "docker-compose.yml"
+ENV_FILE = ROOT / ".env"
+ENV_TEMPLATE = ROOT / ".env.example"
 
 errors = []
 warnings = []
@@ -33,10 +35,34 @@ def load():
         return yaml.safe_load(fh)
 
 
-_DEFAULT = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}")
+def load_env_file(path):
+    """Parse KEY=VALUE lines; comments and blank lines are ignored."""
+    values = {}
+    if not path.exists():
+        return values
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
 
 
-def host_ports(service_name, svc):
+_VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _expand(text, env):
+    def repl(match):
+        name, default = match.group(1), match.group(2)
+        if env.get(name):
+            return env[name]
+        return default if default is not None else match.group(0)
+
+    return _VAR.sub(repl, text)
+
+
+def host_ports(service_name, svc, env):
     """Return [(port:int, proto:str)] as published on the host."""
     out = []
     for entry in svc.get("ports", []) or []:
@@ -44,7 +70,7 @@ def host_ports(service_name, svc):
         proto = "tcp"
         if "/" in text:
             text, proto = text.rsplit("/", 1)
-        text = _DEFAULT.sub(r"\1", text)
+        text = _expand(text, env)
         if "$" in text:
             warnings.append(f"{service_name}: unresolved variable in port {text}")
             continue
@@ -64,13 +90,29 @@ def code_dir(svc):
     return match.group(1) if match else None
 
 
-def check_port_collisions(services, enabled_profiles, label):
+def check_env_documentation():
+    """Every variable the compose file reads must be listed in .env.example."""
+    if not ENV_TEMPLATE.exists():
+        errors.append(".env.example missing: host-port overrides would be undocumented")
+        return
+    documented = set(load_env_file(ENV_TEMPLATE))
+    used = set(
+        re.findall(
+            r"\$\{([A-Za-z_][A-Za-z0-9_]*)",
+            COMPOSE.read_text(encoding="utf-8"),
+        )
+    )
+    for name in sorted(used - documented):
+        errors.append(f".env.example: {name} is used in docker-compose.yml but not documented")
+
+
+def check_port_collisions(services, enabled_profiles, label, env):
     seen = defaultdict(list)
     for name, svc in services.items():
         profiles = set(svc.get("profiles") or [])
         if profiles and not profiles & enabled_profiles:
             continue
-        for port, proto in host_ports(name, svc):
+        for port, proto in host_ports(name, svc, env):
             seen[(port, proto)].append(name)
     for (port, proto), owners in sorted(seen.items()):
         if len(owners) > 1:
@@ -79,15 +121,43 @@ def check_port_collisions(services, enabled_profiles, label):
             )
 
 
+def check_stp_template():
+    """STP config must be rendered from .env, never committed with point codes."""
+    template = ROOT / "stp" / "config" / "osmo-stp.cfg.template"
+    if not template.exists():
+        errors.append("stp/config/osmo-stp.cfg.template missing: STP cannot render from .env")
+        return
+    entrypoint = ROOT / "docker" / "stp" / "entrypoint.sh"
+    if not entrypoint.exists():
+        errors.append("docker/stp/entrypoint.sh missing: template would never be rendered")
+    text = template.read_text(encoding="utf-8", errors="replace")
+    for token in ("point-code ${STP_LOCAL_PC}", "${STP_ROUTES}"):
+        if token not in text:
+            errors.append(f"stp template: expected placeholder missing ({token})")
+    for path in sorted((ROOT / "stp" / "config").glob("*")):
+        if not path.is_file():
+            continue
+        body = path.read_text(encoding="utf-8", errors="replace")
+        for match in re.finditer(r"^\s*(?:point-code|route)\s+([0-9][0-9.]*)", body, re.M):
+            errors.append(f"stp/config/{path.name}: literal point code {match.group(1)} committed")
+
+
 def main():
     if not COMPOSE.exists():
         sys.exit(f"not found: {COMPOSE}")
 
     doc = load()
     services = doc.get("services") or {}
+    env = load_env_file(ENV_FILE if ENV_FILE.exists() else ENV_TEMPLATE)
+    if ENV_FILE.exists():
+        print(f"      host ports resolved from {ENV_FILE.name}")
+    else:
+        print("      host ports resolved from .env.example defaults (no .env)")
 
-    check_port_collisions(services, set(), "default stack")
-    check_port_collisions(services, {"free5gc"}, "default + free5gc")
+    check_env_documentation()
+    check_stp_template()
+    check_port_collisions(services, set(), "default stack", env)
+    check_port_collisions(services, {"free5gc"}, "default + free5gc", env)
 
     for name, svc in services.items():
         if not svc.get("container_name"):

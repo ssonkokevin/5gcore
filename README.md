@@ -35,10 +35,20 @@ There is no UE attach on the custom stack until the AMF gains NGAP/N2 and NAS.
 
 ```bash
 cp .env.example .env
-docker compose build
-docker compose up -d
+chmod 600 .env
+./scripts/preflight.sh        # RAM, disk, SCTP, Docker and every published port
+./scripts/bootstrap.sh        # build, start, wait for health
 docker compose ps
 ```
+
+`preflight.sh --strict` makes port conflicts fatal; run it on a shared host
+before the first deploy. Every published host port is a variable in `.env`
+(`db`, `oam`, `gmlc`, `grafana` and `prometheus` clash on 3306/8081/8082/3000/9090
+on the shared lab VM). `bootstrap.sh` prints the ports actually in use.
+
+The STP renders its configuration at container start from `STP_LOCAL_PC`,
+`STP_REMOTE_PCS` and `STP_ROUTES`; no point code is committed. Defaults are lab
+values (1.2.3 with peers 1.2.4 and 1.2.5).
 
 > PCF/SMF/UPF and the local DRA/SCP are **buildable scaffolds/stubs** (config, APIs, and interface placeholders), not protocol-complete or production-ready network functions. Integrate and validate real protocol stacks, simulators, and security controls before any lab interop beyond basic health checks.
 

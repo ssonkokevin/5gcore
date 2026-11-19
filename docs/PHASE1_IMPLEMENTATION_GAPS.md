@@ -153,13 +153,13 @@ Absent Phase 2: **EIR, SMSC/SMSF, IMS (P/I/S-CSCF, MGCF, BGCF).**
 
 Do this before writing new protocol code.
 
-| ID | Task | Why |
-|---|---|---|
-| P0-1 | Parameterise all 44 host-port mappings in `docker-compose.yml` as `${X_HOST_PORT:-default}` and document each in `.env.example` | The target VM shares `10.44.44.121` with another application; hardcoded 3306/8081/8082/3000/9090 will collide |
-| P0-2 | Pre-flight script: check free RAM/disk, `ss -lntup` for every registered host port, `modprobe sctp`, Docker version | Turns a 20-minute mystery into a one-line error |
-| P0-3 | Replace STP point codes and routes with Hamiltel values; blank IMSI filters (already blank) | Vendor PC `3.14.4` cannot be used off the vendor network |
-| P0-4 | Decide the single-IP strategy (see §9.1) | GTP-U and Diameter cannot be multiply-bound on one IP |
-| P0-5 | CI: GitHub Actions running `check_stack.py`, `unittest discover`, and `docker compose config` on every push | 44 tests exist but nothing enforces them |
+| ID | Task | Why | Status |
+|---|---|---|---|
+| P0-1 | Parameterise all host-port mappings in `docker-compose.yml` as `${X_HOST_PORT:-default}` and document each in `.env.example` | The target VM shares `10.44.44.121` with another application; hardcoded 3306/8081/8082/3000/9090 will collide | Done — 49 published ports, one `.env` block, `check_stack.py` resolves `.env` overrides before collision checks |
+| P0-2 | Pre-flight script: check free RAM/disk, `ss -lntup` for every registered host port, `modprobe sctp`, Docker version | Turns a 20-minute mystery into a one-line error | Done — `scripts/preflight.sh` (add `--strict` to make port conflicts fatal) |
+| P0-3 | Replace STP point codes and routes with Hamiltel values; blank IMSI filters (already blank) | Vendor PC `3.14.4` cannot be used off the vendor network | Done — config is rendered from `.env` at start; lab defaults 1.2.3 / 1.2.4 / 1.2.5, no point code committed |
+| P0-4 | Decide the single-IP strategy (see §9.1) | GTP-U and Diameter cannot be multiply-bound on one IP | Open — operator decision |
+| P0-5 | CI: GitHub Actions running `check_stack.py`, `unittest discover`, and `docker compose config` on every push | 44 tests exist but nothing enforces them | Done — `.github/workflows/ci.yml` (+ shell syntax and secret scan) |
 
 **Done when:** a clean clone on the target VM reaches `docker compose ps` with 24
 services healthy, and CI is green on `master`.

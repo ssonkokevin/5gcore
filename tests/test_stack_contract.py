@@ -59,6 +59,46 @@ class TestStaticContracts(unittest.TestCase):
         missing = sorted(v for v in used if not re.search(rf"^{v}=", documented, re.M))
         self.assertEqual(missing, [], f"undocumented variables: {missing}")
 
+    def test_every_published_port_is_parameterised(self):
+        services = load_compose()["services"]
+        hard = []
+        for name, svc in services.items():
+            for entry in svc.get("ports", []) or []:
+                if not str(entry).strip('"').startswith("${"):
+                    hard.append(f"{name}: {entry}")
+        self.assertEqual(hard, [], "host ports must be ${X_HOST_PORT:-default}")
+
+    def test_host_port_override_does_not_move_the_container_listener(self):
+        services = load_compose()["services"]
+        self.assertIn("AMF_PORT=8001", services["custom-amf"]["environment"])
+        self.assertIn("LMF_PORT=8003", services["custom-lmf"]["environment"])
+        self.assertIn("MME_SLG_PORT=3875", services["custom-mme"]["environment"])
+        self.assertIn("MME_HTTP_PORT=8075", services["custom-mme"]["environment"])
+
+    def test_env_override_is_honoured_in_collision_checks(self):
+        checker = load_checker()
+        services = load_compose()["services"]
+        env = {key: "8080" for key in ("DB_HOST_PORT", "HSSDB_HOST_PORT", "REDIS_HOST_PORT")}
+        checker.errors.clear()
+        checker.check_port_collisions(services, set(), "test", env)
+        self.assertTrue(
+            any("8080/tcp" in item for item in checker.errors),
+            "an .env override that collides must be reported",
+        )
+
+    def test_stp_config_is_rendered_not_committed(self):
+        template = (ROOT / "stp" / "config" / "osmo-stp.cfg.template").read_text(encoding="utf-8")
+        self.assertIn("point-code ${STP_LOCAL_PC}", template)
+        self.assertIn("${STP_ROUTES}", template)
+        self.assertTrue((ROOT / "docker" / "stp" / "entrypoint.sh").exists())
+        for path in (ROOT / "stp" / "config").glob("*"):
+            if not path.is_file():
+                continue
+            for line in path.read_text(encoding="utf-8").splitlines():
+                stripped = line.strip()
+                if stripped.startswith(("route ", "point-code ")):
+                    self.assertIn("${", stripped, f"{path.name}: literal point code committed")
+
     def test_gmlc_has_no_position_synthesis(self):
         source = (ROOT / "gmlc" / "src" / "gmlc_server.py").read_text(encoding="utf-8")
         for token in ("_simulate_location_lookup", "hashlib.md5", "37.7749"):

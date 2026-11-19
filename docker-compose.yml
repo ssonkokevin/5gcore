@@ -5,22 +5,33 @@
 #   * profile "free5gc"        — upstream Free5GC v3.4.0 NFs kept only as a reference
 #                                implementation for comparison and regression testing.
 #
-# Authoritative host-port register (host:container):
-#   3306  db                     3307  hssdb                 6379  redis
-#   2905  osmo-stp  sctp+udp     2906  map-sccp tcp+udp      2907  camel tcp+sctp
-#   2908  scp sctp               3871  scp tcp               3868  dra tcp+sctp
-#   3870  ocs tcp+sctp           3880  diameter-s6a-cx       3873  pcf Gx
-#   3874  pcf Gy                 8000  custom-nrf            8002  custom-smf http
-#   8004  custom-pcf http        8007  custom-udm            8081  oam
-#   8001  custom-amf http        8003  custom-lmf            8075  custom-mme http
-#   3875  custom-mme SLg tcp     8082  gmlc                  8090  hss
-#   3001  oam-frontend
-#   8805  custom-upf PFCP        8806  custom-smf PFCP       2152  custom-upf GTP-U
-#   42050 custom-upf mgmt        9090  prometheus            3000  grafana
+# Authoritative host-port register (host:container). Every host port is a
+# variable so a shared VM can move any of them without editing this file;
+# defaults listed. See the "Host ports" block in .env.example.
+#   3306  db  ${DB_HOST_PORT}              3307  hssdb  ${HSSDB_HOST_PORT}
+#   6379  redis ${REDIS_HOST_PORT}
+#   2905  osmo-stp  sctp+udp ${STP_HOST_PORT}
+#   2906  map-sccp tcp+udp ${MAP_HOST_PORT}   2907  camel tcp+sctp ${CAMEL_HOST_PORT}
+#   2908  scp sctp ${SCP_SCTP_HOST_PORT}      3871  scp tcp ${SCP_HOST_PORT}
+#   3868  dra tcp+sctp ${DRA_HOST_PORT}       3870  ocs tcp+sctp ${OCS_HOST_PORT}
+#   3880  diameter-s6a-cx ${DIAMETER_HOST_PORT}
+#   3873  pcf Gx ${PCF_GX_HOST_PORT}          3874  pcf Gy ${PCF_GY_HOST_PORT}
+#   8000  custom-nrf ${NRF_HOST_PORT}         8002  custom-smf http ${SMF_HOST_PORT}
+#   8004  custom-pcf http ${PCF_HOST_PORT}    8007  custom-udm ${CUSTOM_UDM_HOST_PORT}
+#   8081  oam ${OAM_HOST_PORT}                8001  custom-amf http ${AMF_HOST_PORT}
+#   8003  custom-lmf ${LMF_HOST_PORT}         8075  custom-mme http ${MME_HTTP_HOST_PORT}
+#   3875  custom-mme SLg ${MME_SLG_HOST_PORT} 8082  gmlc ${GMLC_HOST_PORT}
+#   8090  hss ${HSS_HOST_PORT}                3001  oam-frontend ${OAM_FRONTEND_PORT}
+#   8805  custom-upf PFCP ${UPF_PFCP_HOST_PORT}
+#   8806  custom-smf PFCP ${SMF_PFCP_HOST_PORT}
+#   2152  custom-upf GTP-U ${UPF_GTPU_HOST_PORT}
+#   42050 custom-upf mgmt ${UPF_MGMT_HOST_PORT}
+#   9090  prometheus ${PROMETHEUS_HOST_PORT}  3000  grafana ${GRAFANA_HOST_PORT}
 #
 # free5gc profile host ports are moved to the 18xxx range so that a future custom
 # AMF NGAP listener can claim 38412 without a collision: 18000 nrf, 18080/38413 amf, 18081/18085 smf,
-# 18152/18086 upf, 18082 ausf, 18083 udm, 18084 pcf, 18087 chf, 27017 mongo.
+# 18152/18086 upf, 18082 ausf, 18083 udm, 18084 pcf, 18087 chf, 27017 mongo
+# (F5G_*_HOST_PORT and MONGO_HOST_PORT).
 #
 # Rule: a host port may appear twice only with different protocols (tcp/sctp/udp).
 # scripts/check_stack.py enforces this.
@@ -42,7 +53,7 @@ services:
       - core-db-data:/var/lib/mysql
       - ./database:/docker-entrypoint-initdb.d:ro
     ports:
-      - "3306:3306"
+      - "${DB_HOST_PORT:-3306}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-change-me}"]
       interval: 10s
@@ -66,7 +77,7 @@ services:
       - ./database/hssdbInitial.sql:/docker-entrypoint-initdb.d/01_hssdbInitial.sql:ro
       - ./database/eps_udr.sql:/docker-entrypoint-initdb.d/02_eps_udr.sql:ro
     ports:
-      - "3307:3306"
+      - "${HSSDB_HOST_PORT:-3307}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-change-me}"]
       interval: 10s
@@ -84,7 +95,7 @@ services:
     volumes:
       - core-redis-data:/data
     ports:
-      - "6379:6379"
+      - "${REDIS_HOST_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-change-me}", "ping"]
       interval: 10s
@@ -117,7 +128,7 @@ services:
       - ./nrf/config:/app/config:ro
       - ./nrf/src:/app/src
     ports:
-      - "8000:8000/tcp"
+      - "${NRF_HOST_PORT:-8000}:8000/tcp"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2)"]
       interval: 10s
@@ -142,12 +153,15 @@ services:
         condition: service_healthy
     environment:
       - STP_INSTANCE_ID=${STP_INSTANCE_ID:-srg01}
-      - STP_LOCAL_PC=${STP_LOCAL_PC:-3.14.4}
+      # Lab/mock point codes by default — no production point code is committed.
+      - STP_LOCAL_PC=${STP_LOCAL_PC:-1.2.3}
       - STP_NI=${STP_NI:-natl}
       - STP_ASP_MODE=${STP_ASP_MODE:-server}
       - STP_LOCAL_IP=${STP_LOCAL_IP:-0.0.0.0}
       - STP_LOCAL_PORT=${STP_LOCAL_PORT:-2905}
-      - STP_REMOTE_PCS=${STP_REMOTE_PCS:-}
+      - STP_REMOTE_IP=${STP_REMOTE_IP:-0.0.0.0}
+      - STP_REMOTE_PCS=${STP_REMOTE_PCS:-1.2.4 1.2.5}
+      - STP_ROUTES=${STP_ROUTES:-}
       - DB_HOST=${DB_HOST:-db}
       - DB_PORT=${DB_PORT:-3306}
       - DB_USER=${DB_USER:-net5gc}
@@ -157,9 +171,9 @@ services:
       - ./stp/config:/etc/osmocom/stp:ro
       - ./stp/scripts:/usr/local/bin/stp-scripts:ro
     ports:
-      - "2905:2905/sctp"
-      - "2905:2905/udp"
-    command: ["/usr/local/bin/osmo-stp", "-c", "/etc/osmocom/stp/osmo-stp.cfg"]
+      - "${STP_HOST_PORT:-2905}:2905/sctp"
+      - "${STP_HOST_PORT:-2905}:2905/udp"
+    command: ["/usr/local/bin/stp-entrypoint.sh"]
     networks:
       - core-net
 
@@ -198,8 +212,8 @@ services:
       - ./dra/config:/app/config:ro
       - ./dra/src:/app/src
     ports:
-      - "3868:3868/tcp"
-      - "3868:3868/sctp"
+      - "${DRA_HOST_PORT:-3868}:3868/tcp"
+      - "${DRA_HOST_PORT:-3868}:3868/sctp"
     command: ["python", "/app/src/dra_engine.py"]
     networks:
       - core-net
@@ -226,8 +240,8 @@ services:
       - DB_NAME=hssdb
       - LOG_LEVEL=${LOG_LEVEL:-info}
     ports:
-      - "3880:3868/tcp"
-      - "3880:3868/sctp"
+      - "${DIAMETER_HOST_PORT:-3880}:3868/tcp"
+      - "${DIAMETER_HOST_PORT:-3880}:3868/sctp"
     command: ["python", "/app/src/diameter_server.py"]
     networks:
       - core-net
@@ -253,8 +267,8 @@ services:
       - DB_NAME=hssdb
       - LOG_LEVEL=${LOG_LEVEL:-info}
     ports:
-      - "2906:2905/tcp"
-      - "2906:2905/udp"
+      - "${MAP_HOST_PORT:-2906}:2905/tcp"
+      - "${MAP_HOST_PORT:-2906}:2905/udp"
     command: ["python", "/app/src/map_sccp_server.py"]
     networks:
       - core-net
@@ -285,8 +299,8 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     ports:
-      - "2907:2906/tcp"
-      - "2907:2906/sctp"
+      - "${CAMEL_HOST_PORT:-2907}:2906/tcp"
+      - "${CAMEL_HOST_PORT:-2907}:2906/sctp"
     command: ["python", "/app/src/camel_engine.py"]
     networks:
       - core-net
@@ -308,8 +322,8 @@ services:
       - OCS_SESSION_TIMEOUT=${OCS_SESSION_TIMEOUT:-300}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     ports:
-      - "3870:3869/tcp"
-      - "3870:3869/sctp"
+      - "${OCS_HOST_PORT:-3870}:3869/tcp"
+      - "${OCS_HOST_PORT:-3870}:3869/sctp"
     command: ["python", "/app/src/ocs_client.py"]
     networks:
       - core-net
@@ -343,8 +357,8 @@ services:
       - ./scp/src:/app/src
       - ./scp/config:/app/config:ro
     ports:
-      - "3871:3869/tcp"
-      - "2908:2905/sctp"
+      - "${SCP_HOST_PORT:-3871}:3869/tcp"
+      - "${SCP_SCTP_HOST_PORT:-2908}:2905/sctp"
     command: ["python", "/app/src/scp_engine.py"]
     networks:
       - core-net
@@ -393,7 +407,7 @@ services:
     volumes:
       - ./hss/config:/app/config:ro
     ports:
-      - "8090:8090/tcp"
+      - "${HSS_HOST_PORT:-8090}:8090/tcp"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=2)"]
       interval: 15s
@@ -441,7 +455,7 @@ services:
       - ./udm/src:/app/src
       - ./udm/config:/app/config:ro
     ports:
-      - "8007:8080/tcp"
+      - "${CUSTOM_UDM_HOST_PORT:-8007}:8080/tcp"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=2)"]
       interval: 15s
@@ -486,9 +500,9 @@ services:
       - ./pcf/config:/app/config:ro
       - ./pcf/src:/app/src
     ports:
-      - "8004:7777/tcp"
-      - "3873:3870/tcp"
-      - "3874:3871/tcp"
+      - "${PCF_HOST_PORT:-8004}:7777/tcp"
+      - "${PCF_GX_HOST_PORT:-3873}:3870/tcp"
+      - "${PCF_GY_HOST_PORT:-3874}:3871/tcp"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:7777/health',timeout=2)"]
       interval: 15s
@@ -525,8 +539,8 @@ services:
       - ./smf/config:/app/config:ro
       - ./smf/src:/app/src
     ports:
-      - "8002:7777/tcp"
-      - "8806:8805/udp"
+      - "${SMF_HOST_PORT:-8002}:7777/tcp"
+      - "${SMF_PFCP_HOST_PORT:-8806}:8805/udp"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:7777/health',timeout=2)"]
       interval: 15s
@@ -556,9 +570,9 @@ services:
       - ./upf/config:/app/config:ro
       - ./upf/src:/app/src
     ports:
-      - "2152:2152/udp"
-      - "8805:8805/udp"
-      - "42050:42050/tcp"
+      - "${UPF_GTPU_HOST_PORT:-2152}:2152/udp"
+      - "${UPF_PFCP_HOST_PORT:-8805}:8805/udp"
+      - "${UPF_MGMT_HOST_PORT:-42050}:42050/tcp"
     command: ["python3", "/app/src/upf_server.py"]
     networks:
       - core-net
@@ -595,7 +609,7 @@ services:
       - ./gmlc/config:/app/config:ro
       - ./gmlc/src:/app/src
     ports:
-      - "8082:8082/tcp"
+      - "${GMLC_HOST_PORT:-8082}:8082/tcp"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8082/health',timeout=2)"]
       interval: 15s
@@ -644,7 +658,7 @@ services:
     volumes:
       - ./oam:/app:ro
     ports:
-      - "8081:8081/tcp"
+      - "${OAM_HOST_PORT:-8081}:8081/tcp"
     command: ["python", "/app/manage.py", "runserver", "0.0.0.0:8081"]
     networks:
       - core-net
@@ -672,7 +686,7 @@ services:
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
-      - "9090:9090/tcp"
+      - "${PROMETHEUS_HOST_PORT:-9090}:9090/tcp"
     networks:
       - core-net
 
@@ -685,7 +699,7 @@ services:
     volumes:
       - core-grafana-data:/var/lib/grafana
     ports:
-      - "3000:3000/tcp"
+      - "${GRAFANA_HOST_PORT:-3000}:3000/tcp"
     networks:
       - core-net
 
@@ -701,7 +715,7 @@ services:
     volumes:
       - core-mongo-data:/data/db
     ports:
-      - "27017:27017"
+      - "${MONGO_HOST_PORT:-27017}:27017"
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.runCommand({ping:1})"]
       interval: 10s
@@ -720,7 +734,7 @@ services:
       - NRF_PORT=8000
       - DB_URI=mongodb://mongo:27017
     ports:
-      - "18000:8000/tcp"
+      - "${F5G_NRF_HOST_PORT:-18000}:8000/tcp"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/nnrf-nfm/v1/nf-instances"]
       interval: 10s
@@ -757,8 +771,8 @@ services:
       - N2_INTERFACE_GNB_ADDR=gnb
       - N2_INTERFACE_GNB_PORT=38412
     ports:
-      - "18080:80/tcp"
-      - "38413:38412/sctp"
+      - "${F5G_AMF_HOST_PORT:-18080}:80/tcp"
+      - "${F5G_AMF_N2_HOST_PORT:-38413}:38412/sctp"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
       interval: 10s
@@ -786,8 +800,8 @@ services:
       - DNS_SECONDARY=${DNS_SECONDARY:-8.8.4.4}
       - SUBNET_POOL=${SUBNET_POOL:-10.60.0.0/16}
     ports:
-      - "18081:80/tcp"
-      - "18085:8805/udp"
+      - "${F5G_SMF_HOST_PORT:-18081}:80/tcp"
+      - "${F5G_SMF_PFCP_HOST_PORT:-18085}:8805/udp"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
       interval: 10s
@@ -816,8 +830,8 @@ services:
       - N4_INTERFACE_SMF_ADDR=smf
       - N4_INTERFACE_SMF_PORT=8805
     ports:
-      - "18152:2152/udp"
-      - "18086:8805/udp"
+      - "${F5G_UPF_GTPU_HOST_PORT:-18152}:2152/udp"
+      - "${F5G_UPF_PFCP_HOST_PORT:-18086}:8805/udp"
     networks:
       - core-net
     depends_on:
@@ -835,7 +849,7 @@ services:
       - NRF_ADDR=nrf
       - NRF_PORT=8000
     ports:
-      - "18082:80/tcp"
+      - "${F5G_AUSF_HOST_PORT:-18082}:80/tcp"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
       interval: 10s
@@ -859,7 +873,7 @@ services:
       - NRF_PORT=8000
       - DB_URI=mongodb://mongo:27017
     ports:
-      - "18083:80/tcp"
+      - "${F5G_UDM_HOST_PORT:-18083}:80/tcp"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
       interval: 10s
@@ -884,7 +898,7 @@ services:
       - NRF_ADDR=nrf
       - NRF_PORT=8000
     ports:
-      - "18084:80/tcp"
+      - "${F5G_PCF_HOST_PORT:-18084}:80/tcp"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
       interval: 10s
@@ -907,7 +921,7 @@ services:
       - NRF_ADDR=nrf
       - NRF_PORT=8000
     ports:
-      - "18087:80/tcp"
+      - "${F5G_CHF_HOST_PORT:-18087}:80/tcp"
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
       interval: 10s
@@ -935,7 +949,7 @@ services:
         condition: service_healthy
     environment:
       - AMF_HOST=0.0.0.0
-      - AMF_PORT=${AMF_PORT:-8001}
+      - AMF_PORT=8001
       - AMF_PUBLIC_HOST=${AMF_PUBLIC_HOST:-amf.core.local}
       - AMF_IPV4=${AMF_IPV4:-}
       - AMF_LMF_TIMEOUT=${AMF_LMF_TIMEOUT:-5}
@@ -950,7 +964,7 @@ services:
       - ./amf/src:/app/src
       - ./corelib:/app/corelib:ro
     ports:
-      - "${AMF_PORT:-8001}:8001/tcp"
+      - "${AMF_HOST_PORT:-8001}:8001/tcp"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=2)"]
       interval: 15s
@@ -972,7 +986,7 @@ services:
         condition: service_healthy
     environment:
       - LMF_HOST=0.0.0.0
-      - LMF_PORT=${LMF_PORT:-8003}
+      - LMF_PORT=8003
       - LMF_PUBLIC_HOST=${LMF_PUBLIC_HOST:-lmf.core.local}
       - LMF_IPV4=${LMF_IPV4:-}
       - LMF_PROVIDER_URL=${LMF_PROVIDER_URL:-}
@@ -986,7 +1000,7 @@ services:
       - ./lmf/src:/app/src
       - ./corelib:/app/corelib:ro
     ports:
-      - "${LMF_PORT:-8003}:8003/tcp"
+      - "${LMF_HOST_PORT:-8003}:8003/tcp"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8003/health',timeout=2)"]
       interval: 15s
@@ -1005,8 +1019,8 @@ services:
     restart: unless-stopped
     environment:
       - MME_HOST=0.0.0.0
-      - MME_SLG_PORT=${MME_SLG_PORT:-3875}
-      - MME_HTTP_PORT=${MME_HTTP_PORT:-8075}
+      - MME_SLG_PORT=3875
+      - MME_HTTP_PORT=8075
       - MME_ORIGIN_HOST=${MME_ORIGIN_HOST:-mme.core.local}
       - MME_ORIGIN_REALM=${MME_ORIGIN_REALM:-core.local}
       - MME_PRODUCT_NAME=${MME_PRODUCT_NAME:-Hamiltel-MME}
@@ -1016,8 +1030,8 @@ services:
       - ./mme/src:/app/src
       - ./corelib:/app/corelib:ro
     ports:
-      - "${MME_SLG_PORT:-3875}:3875/tcp"
-      - "${MME_HTTP_PORT:-8075}:8075/tcp"
+      - "${MME_SLG_HOST_PORT:-3875}:3875/tcp"
+      - "${MME_HTTP_HOST_PORT:-8075}:8075/tcp"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8075/health',timeout=2)"]
       interval: 15s

@@ -115,28 +115,28 @@ fi
 
 compose ps
 
-cat <<'EOF'
+cat <<EOF
 
-Custom-core host ports
-  3306 db            3307 hssdb         6379 redis
-  8000 custom-nrf    8002 custom-smf    8004 custom-pcf     8007 custom-udm
-  8081 oam           8082 gmlc          8090 hss
-  8001 custom-amf    8003 custom-lmf    8075 custom-mme http
-  3875 custom-mme SLg Diameter (tcp)
-  8805 upf PFCP      8806 smf PFCP      2152 upf GTP-U
-  3868 dra           3880 diameter-s6a-cx
-  2905 osmo-stp      2906 map-sccp      2907 camel          2908 scp
-  3870 ocs           3871 scp           3873 pcf Gx         3874 pcf Gy
-  3001 oam-frontend  3000 grafana       9090 prometheus
+Custom-core host ports (values from .env; change them there, not in compose)
+  ${DB_HOST_PORT:-3306} db            ${HSSDB_HOST_PORT:-3307} hssdb         ${REDIS_HOST_PORT:-6379} redis
+  ${NRF_HOST_PORT:-8000} custom-nrf   ${SMF_HOST_PORT:-8002} custom-smf    ${PCF_HOST_PORT:-8004} custom-pcf     ${CUSTOM_UDM_HOST_PORT:-8007} custom-udm
+  ${OAM_HOST_PORT:-8081} oam          ${GMLC_HOST_PORT:-8082} gmlc          ${HSS_HOST_PORT:-8090} hss
+  ${AMF_HOST_PORT:-8001} custom-amf   ${LMF_HOST_PORT:-8003} custom-lmf    ${MME_HTTP_HOST_PORT:-8075} custom-mme http
+  ${MME_SLG_HOST_PORT:-3875} custom-mme SLg Diameter (tcp)
+  ${UPF_PFCP_HOST_PORT:-8805} upf PFCP  ${SMF_PFCP_HOST_PORT:-8806} smf PFCP  ${UPF_GTPU_HOST_PORT:-2152} upf GTP-U
+  ${DRA_HOST_PORT:-3868} dra          ${DIAMETER_HOST_PORT:-3880} diameter-s6a-cx
+  ${STP_HOST_PORT:-2905} osmo-stp     ${MAP_HOST_PORT:-2906} map-sccp      ${CAMEL_HOST_PORT:-2907} camel      ${SCP_SCTP_HOST_PORT:-2908} scp
+  ${OCS_HOST_PORT:-3870} ocs          ${SCP_HOST_PORT:-3871} scp           ${PCF_GX_HOST_PORT:-3873} pcf Gx     ${PCF_GY_HOST_PORT:-3874} pcf Gy
+  ${OAM_FRONTEND_PORT:-3001} oam-frontend  ${GRAFANA_HOST_PORT:-3000} grafana  ${PROMETHEUS_HOST_PORT:-9090} prometheus
 
 Smoke test:
-  curl -sf http://localhost:8000/health   # nrf
-  curl -sf http://localhost:8007/health   # udm
-  curl -sf http://localhost:8082/health   # gmlc
-  curl -sf http://localhost:8003/health   # lmf  (provider=none until configured)
-  curl -sf http://localhost:8001/health   # amf  (n2_ngap=not implemented)
-  curl -sf http://localhost:8075/scope    # mme  (SLg only)
-  curl -s  -X POST http://localhost:8082/lcs/location-request \
+  curl -sf http://localhost:${NRF_HOST_PORT:-8000}/health   # nrf
+  curl -sf http://localhost:${CUSTOM_UDM_HOST_PORT:-8007}/health   # udm
+  curl -sf http://localhost:${GMLC_HOST_PORT:-8082}/health   # gmlc
+  curl -sf http://localhost:${LMF_HOST_PORT:-8003}/health   # lmf  (provider=none until configured)
+  curl -sf http://localhost:${AMF_HOST_PORT:-8001}/health   # amf  (n2_ngap=not implemented)
+  curl -sf http://localhost:${MME_HTTP_HOST_PORT:-8075}/scope    # mme  (SLg only)
+  curl -s  -X POST http://localhost:${GMLC_HOST_PORT:-8082}/lcs/location-request \
        -H 'content-type: application/json' \
        -d '{"msisdn":"256700000001","request_type":"immediate"}'
   # expected: status=failed, error_code=NO_LCS_SOURCE

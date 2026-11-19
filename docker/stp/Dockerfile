@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y \
     automake \
     build-essential \
     ca-certificates \
+    gettext-base \
     git \
     libtool \
     libpcap-dev \
@@ -27,8 +28,11 @@ RUN git clone --depth 1 https://gerrit.osmocom.org/osmo-stp.git . \
 # Create config and log directories
 RUN mkdir -p /etc/osmocom/stp /var/log/osmocom
 
-# Copy production-grade osmo-stp config (environment variables substituted at runtime)
-COPY ./stp/config/osmo-stp.cfg /etc/osmocom/stp/osmo-stp.cfg
+# Template is also bind-mounted from ./stp/config at runtime; this copy is the
+# fallback for running the image without the compose volume.
+COPY ./stp/config/osmo-stp.cfg.template /etc/osmocom/stp/osmo-stp.cfg.template
+COPY ./docker/stp/entrypoint.sh /usr/local/bin/stp-entrypoint.sh
+RUN chmod 0755 /usr/local/bin/stp-entrypoint.sh
 
 EXPOSE 2905/sctp 2905/udp
-CMD ["/usr/bin/osmo-stp", "-c", "/etc/osmocom/stp/osmo-stp.cfg"]
+CMD ["/usr/local/bin/stp-entrypoint.sh"]
