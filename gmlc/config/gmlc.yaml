@@ -23,31 +23,24 @@ redis:
   port: ${REDIS_PORT}
   password: "${REDIS_PASSWORD}"
 
-# MAP/CAMEL Interface (SS7/SIGTRAN via STP)
+# MAP/CAMEL Interface (SS7/SIGTRAN via STP) — NOT IMPLEMENTED in this pilot
 map:
-  enabled: true
+  enabled: false
   local_ssn: 8
   remote_ssn: 8
   stp_host: "osmo-stp"
   stp_port: 2905
   sctp_role: "client"
 
-# Diameter Interface (SLh/SLg per 29.171/29.172)
+# Diameter Interface (SLh/SLg per 29.171/29.172) — NOT IMPLEMENTED in this pilot
 diameter:
-  enabled: true
+  enabled: false
   port: 3869
   realm: "core.local"
   origin_host: "gmlc.core.local"
   vendor_id: 10415
   product_name: "PaiCore-GMLC"
-  peers:
-    - name: "hss"
-      host: "hss.core.local"
-      port: 3868
-      realm: "core.local"
-      applications:
-        - 16777291  # SLh (LIR/LIA)
-        - 16777292  # SLg (SLR/SLA)
+  peers: []
 
 # LCS (Location Services) Configuration
 lcs:
@@ -65,12 +58,12 @@ lcs:
   response_time: 20        # seconds
   max_retransmissions: 3
 
-# Supported 3GPP Interfaces
+# Supported 3GPP Interfaces (none implemented in this pilot)
 interfaces:
-  slh: true   # GMLC <-> HSS (LIR/LIA)
-  slg: true   # GMLC <-> MME/SGSN (SLR/SLA)
-  slp: true   # GMLC <-> SMLC (PSAP)
-  lcs_cap: true
+  slh: false   # GMLC <-> HSS (LIR/LIA) — not implemented
+  slg: false   # GMLC <-> MME/SGSN (SLR/SLA) — not implemented
+  slp: false   # GMLC <-> SMLC (PSAP) — not implemented
+  lcs_cap: false
 
 # Privacy/Authorization
 privacy:

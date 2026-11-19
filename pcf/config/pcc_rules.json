@@ -1,30 +1,93 @@
 {
   "rules": [
     {
-      "rule_id": "rule_internet",
-      "qci": 9,
-      "arp": 8,
-      "ambr_ul": 120000000,
-      "ambr_dl": 120000000,
-      "charging_key": 1,
-      "rating_group": "basic",
-      "flow_descriptors": [
-        {"ip_proto": 6, "dst_port": 80},
-        {"ip_proto": 6, "dst_port": 443}
-      ]
+      "pccRuleId": "default-internet",
+      "precedence": 255,
+      "flowInfos": [
+        {
+          "flowDescription": "permit out ip from any to any",
+          "flowDirection": "BOTH",
+          "flowId": 1,
+          "packetFilter": {
+            "flowDirection": "BOTH",
+            "flowId": 1,
+            "packetFilterId": "default-internet-filter",
+            "packetFilterContents": "permit out ip from any to any",
+            "packetFilterUsage": true,
+            "tosTrafficClass": "00",
+            "tosTrafficClassMask": "00",
+            "spi": "00000000",
+            "flowLabel": "000000"
+          }
+        }
+      ],
+      "appId": "internet",
+      "refQosData": ["default-qos"],
+      "refChgData": ["default-charging"],
+      "refTcData": ["default-tc"],
+      "refUmData": ["default-um"],
+      "pccRuleStatus": "ACTIVE"
     },
     {
-      "rule_id": "rule_video",
-      "qci": 5,
-      "arp": 5,
-      "ambr_ul": 10000000,
-      "ambr_dl": 50000000,
-      "charging_key": 2,
-      "rating_group": "premium",
-      "flow_descriptors": [
-        {"app_id": "youtube"},
-        {"app_id": "netflix"}
-      ]
+      "pccRuleId": "ims-signalling",
+      "precedence": 10,
+      "flowInfos": [
+        {
+          "flowDescription": "permit out udp from any to any 5060",
+          "flowDirection": "BOTH",
+          "flowId": 1,
+          "packetFilter": {
+            "flowDirection": "BOTH",
+            "flowId": 1,
+            "packetFilterId": "ims-sip-filter",
+            "packetFilterContents": "permit out udp from any to any 5060",
+            "packetFilterUsage": true,
+            "tosTrafficClass": "68",
+            "tosTrafficClassMask": "FC",
+            "spi": "00000000",
+            "flowLabel": "000000"
+          }
+        }
+      ],
+      "appId": "ims",
+      "refQosData": ["ims-qos"],
+      "refChgData": ["ims-charging"],
+      "refTcData": ["ims-tc"],
+      "refUmData": ["ims-um"],
+      "pccRuleStatus": "ACTIVE"
+    },
+    {
+      "pccRuleId": "video-streaming",
+      "precedence": 50,
+      "flowInfos": [],
+      "appId": "video",
+      "refQosData": ["video-qos"],
+      "refChgData": ["video-charging"],
+      "refTcData": ["video-tc"],
+      "refUmData": ["video-um"],
+      "pccRuleStatus": "ACTIVE"
+    },
+    {
+      "pccRuleId": "social-media",
+      "precedence": 100,
+      "flowInfos": [],
+      "appId": "social",
+      "refQosData": ["social-qos"],
+      "refChgData": ["social-charging"],
+      "refTcData": ["social-tc"],
+      "refUmData": ["social-um"],
+      "pccRuleStatus": "ACTIVE"
+    },
+    {
+      "pccRuleId": "gaming",
+      "precedence": 30,
+      "flowInfos": [],
+      "appId": "gaming",
+      "refQosData": ["gaming-qos"],
+      "refChgData": ["gaming-charging"],
+      "refTcData": ["gaming-tc"],
+      "refUmData": ["gaming-um"],
+      "pccRuleStatus": "ACTIVE"
     }
   ]
 }

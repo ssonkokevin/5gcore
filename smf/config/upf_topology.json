@@ -1,0 +1,81 @@
+{
+  "upfs": [
+    {
+      "node_id": "upf-1",
+      "fqdn": "upf.example.com",
+      "ipv4": "10.0.0.30",
+      "n4_port": 8805,
+      "n3_ipv4": "10.0.0.30",
+      "n3_port": 2152,
+      "n6_ipv4": "10.0.0.30",
+      "n9_ipv4": "10.0.0.30",
+      "tai_list": [
+        {"plmn_id": "64108", "tac": 1},
+        {"plmn_id": "64108", "tac": 2}
+      ],
+      "dnn_list": ["internet", "ims"],
+      "snssai_list": [
+        {"sst": 1, "sd": "010203"},
+        {"sst": 2, "sd": "040506"}
+      ],
+      "capacity": 100000,
+      "current_load": 0,
+      "features": {
+        "pfdm": true,
+        "pfde": true,
+        "dpid": true,
+        "ipbd": true,
+        "macd": false,
+        "dnsts": true,
+        "sset": false,
+        "mpas": false,
+        "atsss": true
+      },
+      "supported_5qi": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 65, 66, 67, 69, 70, 71, 72, 73, 74, 75, 76, 79, 80, 82, 83, 84, 85, 86, 87, 88, 89, 90],
+      "dc_gbr_supported": true,
+      "ecn_l4s": true,
+      "pdu_set": true,
+      "ipv6_prefix_delegation": true,
+      "ethernet_pdu": false,
+      "unstructured_pdu": false
+    },
+    {
+      "node_id": "upf-2",
+      "fqdn": "upf-edge.example.com",
+      "ipv4": "10.0.0.31",
+      "n4_port": 8805,
+      "n3_ipv4": "10.0.0.31",
+      "n3_port": 2152,
+      "n6_ipv4": "10.0.0.31",
+      "n9_ipv4": "10.0.0.31",
+      "tai_list": [
+        {"plmn_id": "64108", "tac": 10},
+        {"plmn_id": "64108", "tac": 11}
+      ],
+      "dnn_list": ["internet"],
+      "snssai_list": [
+        {"sst": 1, "sd": "010203"}
+      ],
+      "capacity": 50000,
+      "current_load": 0,
+      "features": {
+        "pfdm": true,
+        "pfde": true,
+        "dpid": true,
+        "ipbd": true,
+        "macd": false,
+        "dnsts": true,
+        "sset": false,
+        "mpas": false,
+        "atsss": false
+      },
+      "supported_5qi": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 65, 66, 67, 69, 70, 79, 80],
+      "dc_gbr_supported": false,
+      "ecn_l4s": true,
+      "pdu_set": false,
+      "ipv6_prefix_delegation": true,
+      "ethernet_pdu": false,
+      "unstructured_pdu": false
+    }
+  ]
+}

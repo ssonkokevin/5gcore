@@ -1,0 +1,23 @@
+{
+  "sessionRules": [
+    {
+      "sessRuleId": "default-session",
+      "authSessAmbr": {
+        "uplink": "1000000000",
+        "downlink": "1000000000"
+      },
+      "authDefQos": {
+        "5qi": 9,
+        "arp": {
+          "priorityLevel": 8,
+          "preemptCap": "NOT_PREEMPT",
+          "preemptVuln": "PREEMPTABLE"
+        },
+        "priorityLevel": 50,
+        "averWindow": 2000,
+        "maxDataBurstVol": 1000
+      },
+      "pccRuleStatus": "ACTIVE"
+    }
+  ]
+}

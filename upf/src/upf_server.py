@@ -12,6 +12,9 @@ logging.basicConfig(
 )
 log = logging.getLogger("upf")
 
+log.warning("UPF STUB: This is NOT a real user plane. No packet forwarding, no eBPF/XDP, no DPI. "
+            "Use free5gc/upf or the vendor binary for staging.")
+
 
 def load_json(path):
     try:

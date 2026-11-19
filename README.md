@@ -9,15 +9,27 @@ Open-source 5G SA core architecture template with STP/DRA/SCP/UDM, PCF/SMF/UPF b
 | STP | osmo-stp / SIGTRAN M3UA | 2905 | SS7/SIGTRAN routing (STP plane) |
 | DRA | Python Diameter agent (stub) | 3868 | Diameter routing/translation (separate plane from STP) |
 | SCP | Python CAMEL/INAP (stub) | 3869, 2906 | Service control plane (SCP-IN / CAMEL context) |
-| UDM | REST + MariaDB | 8080 | Unified data management (lab reference) |
-| PCF/PCRF | Python stub + PCC configs | 7777, 3868/3869 | Policy/charging scaffold (Npcf/Gx/Gy template) |
-| SMF | Python stub + PFCP profile | 7777, 8805 | Session control scaffold (N4 PFCP) |
+| NRF | Python, Redis/memory | 8000 | NF registry and discovery (TS 29.510 subset) |
+| UDM | REST + MariaDB | 8007 (container 8080) | Tri-mode subscriber data, Milenage vectors, SUCI Profiles A/B |
+| PCF/PCRF | Python stub + PCC configs | 7777, 3873/3874 | Policy/charging scaffold (Npcf/Gx/Gy template) |
+| SMF | Python stub + PFCP profile | 8002, 8806 | Session control scaffold (N4 PFCP) |
 | UPF/PGW | Python datapath stub + DPE/CPE configs | 2152, 8805, 42050 | Unified PGW/UPF datapath scaffold |
-| GMLC (pilot) | Docs/config guidance | — | PaiCore GMLC LBS pilot plan (MAP/Diameter/SUPL/MLP/JSON) |
+| GMLC | Python + Redis | 8082 | LCS API; answers NO_LCS_SOURCE until SLg/SLh/MAP exists |
+| AMF | Python SBI proxy | 8001 | NRF registration, Namf_Location to the LMF; no NGAP |
+| LMF | Python SBI | 8003 | Nlmf_Location to a configured provider; 501 without one |
+| MME | Python Diameter SLg | 3875, 8075 | PLR answered 5012; no S1AP/S11/S6a |
 | OAM | Placeholder service | 8081 | Operations & maintenance |
 | DB | MariaDB | 3306 | Core database |
 | Cache | Redis | 6379 | Session / routing cache |
 | Observability | Prometheus / Grafana | 9090 / 3000 | Metrics & dashboards |
+
+## Status
+
+The stack is a **signalling and data-layer testbed**, not yet a deployable core.
+There is no UE attach on the custom stack until the AMF gains NGAP/N2 and NAS.
+
+- Service-by-service truth table: [docs/PHASE1_IMPLEMENTATION_GAPS.md](docs/PHASE1_IMPLEMENTATION_GAPS.md)
+- Phased plan (5GC -> EPC/2G/3G -> EIR/SMS/IMS), acceptance gates, ports to reserve, and effort: same document.
 
 ## Quick Start
 

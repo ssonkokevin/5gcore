@@ -1,25 +1,54 @@
-version: "3.8"
+# Hamiltel custom core — Compose v2 (profiles required; `version:` is obsolete and removed).
+#
+# Two stacks live in this repository and MUST NOT be started together on one host:
+#   * default profile          — the custom core. This is the product.
+#   * profile "free5gc"        — upstream Free5GC v3.4.0 NFs kept only as a reference
+#                                implementation for comparison and regression testing.
+#
+# Authoritative host-port register (host:container):
+#   3306  db                     3307  hssdb                 6379  redis
+#   2905  osmo-stp  sctp+udp     2906  map-sccp tcp+udp      2907  camel tcp+sctp
+#   2908  scp sctp               3871  scp tcp               3868  dra tcp+sctp
+#   3870  ocs tcp+sctp           3880  diameter-s6a-cx       3873  pcf Gx
+#   3874  pcf Gy                 8000  custom-nrf            8002  custom-smf http
+#   8004  custom-pcf http        8007  custom-udm            8081  oam
+#   8001  custom-amf http        8003  custom-lmf            8075  custom-mme http
+#   3875  custom-mme SLg tcp     8082  gmlc                  8090  hss
+#   3001  oam-frontend
+#   8805  custom-upf PFCP        8806  custom-smf PFCP       2152  custom-upf GTP-U
+#   42050 custom-upf mgmt        9090  prometheus            3000  grafana
+#
+# free5gc profile host ports are moved to the 18xxx range so that a future custom
+# AMF NGAP listener can claim 38412 without a collision: 18000 nrf, 18080/38413 amf, 18081/18085 smf,
+# 18152/18086 upf, 18082 ausf, 18083 udm, 18084 pcf, 18087 chf, 27017 mongo.
+#
+# Rule: a host port may appear twice only with different protocols (tcp/sctp/udp).
+# scripts/check_stack.py enforces this.
 
 services:
+  # ========================================================================
+  # Data layer
+  # ========================================================================
   db:
     image: mariadb:10.6
     container_name: core-db
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${DB_NAME}
-      MYSQL_USER: ${DB_USER}
-      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-change-me}
+      MYSQL_DATABASE: ${DB_NAME:-srg_db}
+      MYSQL_USER: ${DB_USER:-net5gc}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-change-me}
     volumes:
       - core-db-data:/var/lib/mysql
       - ./database:/docker-entrypoint-initdb.d:ro
     ports:
       - "3306:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-change-me}"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     networks:
       - core-net
 
@@ -28,20 +57,22 @@ services:
     container_name: core-hssdb
     restart: unless-stopped
     environment:
-      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-change-me}
       MYSQL_DATABASE: hssdb
       MYSQL_USER: hss
-      MYSQL_PASSWORD: ${HSS_DB_PASSWORD}
+      MYSQL_PASSWORD: ${HSS_DB_PASSWORD:-change-me}
     volumes:
       - core-hssdb-data:/var/lib/mysql
-      - ./database/hssdbInitial.sql:/docker-entrypoint-initdb.d/hssdbInitial.sql:ro
+      - ./database/hssdbInitial.sql:/docker-entrypoint-initdb.d/01_hssdbInitial.sql:ro
+      - ./database/eps_udr.sql:/docker-entrypoint-initdb.d/02_eps_udr.sql:ro
     ports:
       - "3307:3306"
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-change-me}"]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 10
+      start_period: 30s
     networks:
       - core-net
 
@@ -49,13 +80,13 @@ services:
     image: redis:7-alpine
     container_name: core-redis
     restart: unless-stopped
-    command: redis-server --requirepass ${REDIS_PASSWORD}
+    command: redis-server --requirepass ${REDIS_PASSWORD:-change-me}
     volumes:
       - core-redis-data:/data
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-change-me}", "ping"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -63,7 +94,42 @@ services:
       - core-net
 
   # ========================================================================
-  # STP/DRA Layer (SS7/SIGTRAN + Diameter)
+  # Registration and discovery
+  # ========================================================================
+  custom-nrf:
+    build:
+      context: .
+      dockerfile: docker/nrf/Dockerfile
+    container_name: core-nrf-custom
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - NRF_HOST=0.0.0.0
+      - NRF_PORT=${CUSTOM_NRF_PORT:-8000}
+      - NRF_HEARTBEAT_TIMER=${NRF_HEARTBEAT_TIMER:-30}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./nrf/config:/app/config:ro
+      - ./nrf/src:/app/src
+    ports:
+      - "8000:8000/tcp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    command: ["python", "/app/src/nrf_server.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # SS7 / SIGTRAN / Diameter
   # ========================================================================
   osmo-stp:
     build:
@@ -82,11 +148,11 @@ services:
       - STP_LOCAL_IP=${STP_LOCAL_IP:-0.0.0.0}
       - STP_LOCAL_PORT=${STP_LOCAL_PORT:-2905}
       - STP_REMOTE_PCS=${STP_REMOTE_PCS:-}
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
+      - DB_HOST=${DB_HOST:-db}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_USER=${DB_USER:-net5gc}
+      - DB_PASSWORD=${DB_PASSWORD:-change-me}
+      - DB_NAME=${DB_NAME:-srg_db}
     volumes:
       - ./stp/config:/etc/osmocom/stp:ro
       - ./stp/scripts:/usr/local/bin/stp-scripts:ro
@@ -97,7 +163,7 @@ services:
     networks:
       - core-net
 
-  open5gs-dra:
+  dra:
     build:
       context: .
       dockerfile: docker/dra/Dockerfile
@@ -116,17 +182,17 @@ services:
       - DRA_REALM=${DRA_REALM:-core.local}
       - DRA_ORIGIN_HOST=${DRA_ORIGIN_HOST:-dra.core.local}
       - DRA_ORIGIN_REALM=${DRA_ORIGIN_REALM:-core.local}
-      - DRA_PRODUCT_NAME=${DRA_PRODUCT_NAME:-Open5GS-DRA}
+      - DRA_PRODUCT_NAME=${DRA_PRODUCT_NAME:-Hamiltel-DRA}
       - DRA_VENDOR_ID=${DRA_VENDOR_ID:-10415}
       - DRA_PEER_CONFIG=${DRA_PEER_CONFIG:-/app/config/dra.json}
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - DB_HOST=${DB_HOST:-db}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_USER=${DB_USER:-net5gc}
+      - DB_PASSWORD=${DB_PASSWORD:-change-me}
+      - DB_NAME=${DB_NAME:-srg_db}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./dra/config:/app/config:ro
@@ -138,9 +204,6 @@ services:
     networks:
       - core-net
 
-  # ========================================================================
-  # Diameter S6a/Cx Server (HSS/HLR Interworking)
-  # ========================================================================
   diameter-s6a-cx:
     build:
       context: .
@@ -155,23 +218,20 @@ services:
       - DIAMETER_ORIGIN_REALM=${DIAMETER_ORIGIN_REALM:-core.local}
       - DIAMETER_VENDOR_ID=${DIAMETER_VENDOR_ID:-10415}
       - DIAMETER_PRODUCT_NAME=${DIAMETER_PRODUCT_NAME:-5G-Core-HSS}
-      - DIAMETER_PORT=${DIAMETER_PORT:-3868}
+      - DIAMETER_PORT=3868
       - DB_HOST=hssdb
       - DB_PORT=3306
       - DB_USER=hss
-      - DB_PASSWORD=${HSS_DB_PASSWORD}
+      - DB_PASSWORD=${HSS_DB_PASSWORD:-change-me}
       - DB_NAME=hssdb
       - LOG_LEVEL=${LOG_LEVEL:-info}
     ports:
-      - "3868:3868/tcp"
-      - "3868:3868/sctp"
+      - "3880:3868/tcp"
+      - "3880:3868/sctp"
     command: ["python", "/app/src/diameter_server.py"]
     networks:
       - core-net
 
-  # ========================================================================
-  # MAP/SCCP Stack (2G/3G HLR Interworking)
-  # ========================================================================
   map-sccp:
     build:
       context: .
@@ -182,26 +242,23 @@ services:
       hssdb:
         condition: service_healthy
     environment:
-      - MAP_POINT_CODE=3142
-      - MAP_SSN_MAP=6
-      - MAP_GT_MAP=208010000000000
+      - MAP_POINT_CODE=${MAP_POINT_CODE:-3142}
+      - MAP_SSN_MAP=${MAP_SSN_MAP:-6}
+      - MAP_GT_MAP=${MAP_GT_MAP:-208010000000000}
       - MAP_PORT=2905
       - DB_HOST=hssdb
       - DB_PORT=3306
       - DB_USER=hss
-      - DB_PASSWORD=${HSS_DB_PASSWORD}
+      - DB_PASSWORD=${HSS_DB_PASSWORD:-change-me}
       - DB_NAME=hssdb
       - LOG_LEVEL=${LOG_LEVEL:-info}
     ports:
-      - "2905:2905/tcp"
-      - "2905:2905/udp"
+      - "2906:2905/tcp"
+      - "2906:2905/udp"
     command: ["python", "/app/src/map_sccp_server.py"]
     networks:
       - core-net
 
-  # ========================================================================
-  # CAMEL State Machine (SCP/CAMEL Call Control)
-  # ========================================================================
   camel:
     build:
       context: .
@@ -221,22 +278,19 @@ services:
       - DB_HOST=hssdb
       - DB_PORT=3306
       - DB_USER=hss
-      - DB_PASSWORD=${HSS_DB_PASSWORD}
+      - DB_PASSWORD=${HSS_DB_PASSWORD:-change-me}
       - DB_NAME=hssdb
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     ports:
-      - "2906:2906/tcp"
-      - "2906:2906/sctp"
+      - "2907:2906/tcp"
+      - "2907:2906/sctp"
     command: ["python", "/app/src/camel_engine.py"]
     networks:
       - core-net
 
-  # ========================================================================
-  # OCS/Gy Client (Online Charging System - RFC 4006)
-  # ========================================================================
   ocs:
     build:
       context: .
@@ -249,278 +303,17 @@ services:
       - OCS_VENDOR_ID=${OCS_VENDOR_ID:-10415}
       - OCS_PRODUCT_NAME=${OCS_PRODUCT_NAME:-5G-Core-OCS}
       - OCS_HOST=0.0.0.0
-      - OCS_PORT=${OCS_PORT:-3869}
+      - OCS_PORT=3869
       - OCS_FAILURE_HANDLING=${OCS_FAILURE_HANDLING:-2}
       - OCS_SESSION_TIMEOUT=${OCS_SESSION_TIMEOUT:-300}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     ports:
-      - "3869:3869/tcp"
-      - "3869:3869/sctp"
+      - "3870:3869/tcp"
+      - "3870:3869/sctp"
     command: ["python", "/app/src/ocs_client.py"]
     networks:
       - core-net
 
-  # ========================================================================
-  # 5GC Control Plane (free5GC / Open5GS)
-  # ========================================================================
-  nrf:
-    image: free5gc/nrf:v3.4.0
-    container_name: core-nrf
-    restart: unless-stopped
-    environment:
-      - NRF_ADDR=nrf
-      - NRF_PORT=8000
-      - DB_URI=mongodb://mongo:27017
-    ports:
-      - "8000:8000/tcp"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/nnrf-nfm/v1/nf-instances"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - core-net
-    depends_on:
-      mongo:
-        condition: service_healthy
-
-  mongo:
-    image: mongo:6
-    container_name: core-mongo
-    restart: unless-stopped
-    volumes:
-      - core-mongo-data:/data/db
-    ports:
-      - "27017:27017"
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.runCommand({ping:1})"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - core-net
-
-  amf:
-    image: free5gc/amf:v3.4.0
-    container_name: core-amf
-    restart: unless-stopped
-    environment:
-      - AMF_ADDR=amf
-      - AMF_PORT=80
-      - NRF_ADDR=nrf
-      - NRF_PORT=8000
-      - GUAMI_PLMN_MCC=001
-      - GUAMI_PLMN_MNC=01
-      - GUAMI_REGION_ID=1
-      - GUAMI_SET_ID=1
-      - TAI_PLMN_MCC=001
-      - TAI_PLMN_MNC=01
-      - TAI_TAC=1
-      - PLMN_SUPPORT_0_MCC=001
-      - PLMN_SUPPORT_0_MNC=01
-      - PLMN_SUPPORT_0_TAC=1
-      - N2_INTERFACE_AMF_ADDR=amf
-      - N2_INTERFACE_AMF_PORT=38412
-      - N2_INTERFACE_GNB_ADDR=gnb
-      - N2_INTERFACE_GNB_PORT=38412
-    ports:
-      - "8080:80/tcp"
-      - "38412:38412/sctp"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - core-net
-    depends_on:
-      nrf:
-        condition: service_healthy
-
-  smf:
-    image: free5gc/smf:v3.4.0
-    container_name: core-smf
-    restart: unless-stopped
-    environment:
-      - SMF_ADDR=smf
-      - SMF_PORT=80
-      - NRF_ADDR=nrf
-      - NRF_PORT=8000
-      - UPF_ADDR=upf
-      - UPF_PORT=8805
-      - DNS_PRIMARY=8.8.8.8
-      - DNS_SECONDARY=8.8.4.4
-      - SUBNET_POOL=10.60.0.0/16
-    ports:
-      - "8081:80/tcp"
-      - "8805:8805/udp"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - core-net
-    depends_on:
-      nrf:
-        condition: service_healthy
-      upf:
-        condition: service_started
-
-  upf:
-    image: free5gc/upf:v3.4.0
-    container_name: core-upf
-    restart: unless-stopped
-    environment:
-      - UPF_ADDR=upf
-      - UPF_PORT=8805
-      - N3_INTERFACE_UPF_ADDR=upf
-      - N3_INTERFACE_UPF_PORT=2152
-      - N4_INTERFACE_UPF_ADDR=upf
-      - N4_INTERFACE_UPF_PORT=8805
-      - N4_INTERFACE_SMF_ADDR=smf
-      - N4_INTERFACE_SMF_PORT=8805
-    ports:
-      - "2152:2152/udp"
-      - "8805:8805/udp"
-      - "42050:42050/tcp"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8805"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - core-net
-    depends_on:
-      smf:
-        condition: service_started
-
-  ausf:
-    image: free5gc/ausf:v3.4.0
-    container_name: core-ausf
-    restart: unless-stopped
-    environment:
-      - AUSF_ADDR=ausf
-      - AUSF_PORT=80
-      - NRF_ADDR=nrf
-      - NRF_PORT=8000
-    ports:
-      - "8082:80/tcp"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - core-net
-    depends_on:
-      nrf:
-        condition: service_healthy
-
-  udm:
-    image: free5gc/udm:v3.4.0
-    container_name: core-udm-free5gc
-    restart: unless-stopped
-    environment:
-      - UDM_ADDR=udm
-      - UDM_PORT=80
-      - NRF_ADDR=nrf
-      - NRF_PORT=8000
-      - DB_URI=mongodb://mongo:27017
-    ports:
-      - "8083:80/tcp"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - core-net
-    depends_on:
-      nrf:
-        condition: service_healthy
-      mongo:
-        condition: service_healthy
-
-  # Custom UDM with Tri-Mode (5G/4G/3G/2G) + Batch Upload
-  custom-udm:
-    build:
-      context: .
-      dockerfile: docker/udm/Dockerfile
-    container_name: core-custom-udm
-    restart: unless-stopped
-    depends_on:
-      hssdb:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      - UDM_PORT=8080
-      - DB_HOST=hssdb
-      - DB_PORT=3306
-      - DB_USER=hss
-      - DB_PASSWORD=${HSS_DB_PASSWORD}
-      - DB_NAME=hssdb
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-      - OPERATOR_KEY=${OPERATOR_KEY:-00000000000000000000000000000000}
-    volumes:
-      - ./udm/src:/app/src
-    ports:
-      - "8080:8080/tcp"
-    command: ["python", "/app/src/udm_server.py"]
-    networks:
-      - core-net
-
-  pcf:
-    image: free5gc/pcf:v3.4.0
-    container_name: core-pcf-free5gc
-    restart: unless-stopped
-    environment:
-      - PCF_ADDR=pcf
-      - PCF_PORT=80
-      - NRF_ADDR=nrf
-      - NRF_PORT=8000
-    ports:
-      - "8084:80/tcp"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - core-net
-    depends_on:
-      nrf:
-        condition: service_healthy
-
-  chf:
-    image: free5gc/chf:v3.4.0
-    container_name: core-chf
-    restart: unless-stopped
-    environment:
-      - CHF_ADDR=chf
-      - CHF_PORT=80
-      - NRF_ADDR=nrf
-      - NRF_PORT=8000
-    ports:
-      - "8085:80/tcp"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - core-net
-    depends_on:
-      nrf:
-        condition: service_healthy
-
-  # ========================================================================
-  # SCP / Legacy SS7 Control Plane
-  # ========================================================================
   scp:
     build:
       context: .
@@ -532,32 +325,135 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      open5gs-dra:
+      dra:
         condition: service_started
     environment:
-      - SCP_PORT=${SCP_PORT:-3869}
+      - SCP_PORT=3869
       - SCP_REALM=${SCP_REALM:-core.local}
       - SCP_ORIGIN_HOST=${SCP_ORIGIN_HOST:-scp.core.local}
       - SCP_ORIGIN_REALM=${SCP_ORIGIN_REALM:-core.local}
-      - SCP_CAMEL_PORT=${SCP_CAMEL_PORT:-2906}
-      - DRA_HOST=open5gs-dra
-      - DRA_PORT=${DRA_PORT:-3868}
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - SCP_CAMEL_PORT=2905
+      - DRA_HOST=dra
+      - DRA_PORT=3868
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./scp/src:/app/src
       - ./scp/config:/app/config:ro
     ports:
-      - "3869:3868/tcp"
-      - "2906:2905/sctp"
+      - "3871:3869/tcp"
+      - "2908:2905/sctp"
     command: ["python", "/app/src/scp_engine.py"]
     networks:
       - core-net
 
   # ========================================================================
-  # Custom PCF/SMF/UPF (from engine scaffolds)
+  # Subscriber data
+  # ========================================================================
+  hss:
+    build:
+      context: .
+      dockerfile: docker/hss/Dockerfile
+    container_name: core-hss
+    restart: unless-stopped
+    depends_on:
+      hssdb:
+        condition: service_healthy
+    environment:
+      - HSS_DB_HOST=hssdb
+      - HSS_DB_PORT=3306
+      - HSS_DB_USER=hss
+      - HSS_DB_PASSWORD=${HSS_DB_PASSWORD:-change-me}
+      - HSS_DB_NAME=hssdb
+      - EPS_UDR_DB_NAME=eps_udr
+      - EPS_UDR_DB_HOST=hssdb
+      - EPS_UDR_DB_PORT=3306
+      - EPS_UDR_DB_USER=hss
+      - EPS_UDR_DB_PASSWORD=${HSS_DB_PASSWORD:-change-me}
+      - OPERATOR_KEY=${OPERATOR_KEY:-00000000000000000000000000000000}
+      - AUTH_OPTION=${AUTH_OPTION:-2}
+      - HSS_HOST=hss
+      - HSS_PORT=8090
+      - CUSTOM_UDM_HOST=custom-udm
+      - CUSTOM_UDM_PORT=8080
+      - NRF_ADDR=custom-nrf
+      - NRF_PORT=8000
+      - DIAMETER_ORIGIN_HOST=${DIAMETER_ORIGIN_HOST:-hss.core.local}
+      - DIAMETER_ORIGIN_REALM=${DIAMETER_ORIGIN_REALM:-core.local}
+      - DIAMETER_VENDOR_ID=${DIAMETER_VENDOR_ID:-10415}
+      - DIAMETER_PRODUCT_NAME=${DIAMETER_PRODUCT_NAME:-5G-Core-HSS}
+      - DIAMETER_PORT=3868
+      - MAP_POINT_CODE=${MAP_POINT_CODE:-3142}
+      - MAP_SSN_MAP=${MAP_SSN_MAP:-6}
+      - MAP_GT_MAP=${MAP_GT_MAP:-208010000000000}
+      - MAP_PORT=2905
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./hss/config:/app/config:ro
+    ports:
+      - "8090:8090/tcp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8090/health',timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    command: ["python", "/app/src/nhss_server.py"]
+    networks:
+      - core-net
+
+  custom-udm:
+    build:
+      context: .
+      dockerfile: docker/udm/Dockerfile
+    container_name: core-custom-udm
+    restart: unless-stopped
+    depends_on:
+      hssdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      custom-nrf:
+        condition: service_healthy
+    environment:
+      - UDM_PORT=8080
+      - DB_HOST=hssdb
+      - DB_PORT=3306
+      - DB_USER=hss
+      - DB_PASSWORD=${HSS_DB_PASSWORD:-change-me}
+      - DB_NAME=hssdb
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - OPERATOR_KEY=${OPERATOR_KEY:-00000000000000000000000000000000}
+      - NRF_ADDR=custom-nrf
+      - NRF_PORT=8000
+      # SUCI de-concealment keys stay in this container; never log them.
+      - SUCI_PROFILES=${SUCI_PROFILES:-}
+      - SUCI_PROFILE_A_PRIVATE_KEY=${SUCI_PROFILE_A_PRIVATE_KEY:-}
+      - SUCI_PROFILE_A_PKID=${SUCI_PROFILE_A_PKID:-1}
+      - SUCI_PROFILE_B_PRIVATE_KEY=${SUCI_PROFILE_B_PRIVATE_KEY:-}
+      - SUCI_PROFILE_B_PKID=${SUCI_PROFILE_B_PKID:-2}
+    volumes:
+      - ./udm/src:/app/src
+      - ./udm/config:/app/config:ro
+    ports:
+      - "8007:8080/tcp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8080/health',timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    command: ["python", "/app/src/udm_server.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # Policy and session management (custom)
   # ========================================================================
   custom-pcf:
     build:
@@ -570,27 +466,35 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      custom-nrf:
+        condition: service_healthy
     environment:
       - PCF_HOST=0.0.0.0
-      - PCF_PORT=${PCF_PORT:-7777}
+      - PCF_PORT=7777
       - PCF_REALM=${PCF_REALM:-core.local}
       - PCF_ORIGIN_HOST=${PCF_ORIGIN_HOST:-pcf.core.local}
-      - GX_PORT=${GX_PORT:-3870}
-      - GY_PORT=${GY_PORT:-3871}
+      - GX_PORT=3870
+      - GY_PORT=3871
       - PCRFDB_URI=${PCRFDB_URI:-sqlite:///app/pcrf.db}
-      - NRF_ADDR=nrf
+      - NRF_ADDR=custom-nrf
       - NRF_PORT=8000
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./pcf/config:/app/config:ro
       - ./pcf/src:/app/src
     ports:
-      - "7777:7777/tcp"
-      - "3870:3868/tcp"
-      - "3871:3869/tcp"
+      - "8004:7777/tcp"
+      - "3873:3870/tcp"
+      - "3874:3871/tcp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:7777/health',timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     command: ["python", "/app/src/pcf_server.py"]
     networks:
       - core-net
@@ -602,25 +506,33 @@ services:
     container_name: core-custom-smf
     restart: unless-stopped
     depends_on:
-      upf:
+      custom-upf:
         condition: service_started
+      custom-nrf:
+        condition: service_healthy
     environment:
       - SMF_HOST=0.0.0.0
-      - SMF_PORT=${SMF_PORT:-7778}
+      - SMF_PORT=7777
       - SMF_REALM=${SMF_REALM:-core.local}
       - SMF_DNN=${SMF_DNN:-internet}
       - SMF_UE_SUBNET=${SMF_UE_SUBNET:-10.60.0.0/16}
-      - N4_SMF_UPF_ADDR=upf
-      - PFCP_PORT=${PFCP_PORT:-8805}
-      - NRF_ADDR=nrf
+      - N4_SMF_UPF_ADDR=custom-upf
+      - PFCP_PORT=8805
+      - NRF_ADDR=custom-nrf
       - NRF_PORT=8000
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./smf/config:/app/config:ro
       - ./smf/src:/app/src
     ports:
-      - "7778:7777/tcp"
+      - "8002:7777/tcp"
       - "8806:8805/udp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:7777/health',timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     command: ["python", "/app/src/smf_server.py"]
     networks:
       - core-net
@@ -633,8 +545,8 @@ services:
     restart: unless-stopped
     environment:
       - UPF_CONFIG_DIR=/app/config
-      - PFCP_PORT=${PFCP_PORT:-8805}
-      - GTPU_PORT=${GTPU_PORT:-2152}
+      - PFCP_PORT=8805
+      - GTPU_PORT=2152
       - DATA_PATH_MODE=${DATA_PATH_MODE:-kernel}
       - DPDK_ENABLED=${DPDK_ENABLED:-false}
       - DPI_ENABLED=${DPI_ENABLED:-false}
@@ -652,7 +564,7 @@ services:
       - core-net
 
   # ========================================================================
-  # GMLC (Location Services)
+  # Location services
   # ========================================================================
   gmlc:
     build:
@@ -667,29 +579,35 @@ services:
         condition: service_healthy
     environment:
       - GMLC_HOST=0.0.0.0
-      - GMLC_PORT=${GMLC_PORT:-8082}
+      - GMLC_PORT=8082
       - GMLC_REALM=${GMLC_REALM:-core.local}
       - GMLC_ORIGIN_HOST=${GMLC_ORIGIN_HOST:-gmlc.core.local}
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - DB_HOST=${DB_HOST:-db}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_USER=${DB_USER:-net5gc}
+      - DB_PASSWORD=${DB_PASSWORD:-change-me}
+      - DB_NAME=${DB_NAME:-srg_db}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./gmlc/config:/app/config:ro
       - ./gmlc/src:/app/src
     ports:
       - "8082:8082/tcp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8082/health',timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     command: ["python", "/app/src/gmlc_server.py"]
     networks:
       - core-net
 
   # ========================================================================
-  # OAM / Observability
+  # Management and observability
   # ========================================================================
   oam:
     build:
@@ -706,28 +624,44 @@ services:
         condition: service_healthy
     environment:
       - OAM_PORT=${OAM_PORT:-8081}
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
+      - DB_HOST=${DB_HOST:-db}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_USER=${DB_USER:-net5gc}
+      - DB_PASSWORD=${DB_PASSWORD:-change-me}
+      - DB_NAME=${DB_NAME:-srg_db}
       - HSS_DB_HOST=hssdb
       - HSS_DB_PORT=3306
       - HSS_DB_USER=hss
-      - HSS_DB_PASSWORD=${HSS_DB_PASSWORD}
+      - HSS_DB_PASSWORD=${HSS_DB_PASSWORD:-change-me}
       - HSS_DB_NAME=hssdb
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - OAM_USER=${OAM_USER}
-      - OAM_PASSWORD=${OAM_PASSWORD}
-      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
-      - DJANGO_DEBUG=True
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me}
+      - OAM_USER=${OAM_USER:-admin}
+      - OAM_PASSWORD=${OAM_PASSWORD:-change-me}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-change-me-in-production}
+      - DJANGO_DEBUG=${DJANGO_DEBUG:-False}
     volumes:
       - ./oam:/app:ro
     ports:
       - "8081:8081/tcp"
     command: ["python", "/app/manage.py", "runserver", "0.0.0.0:8081"]
+    networks:
+      - core-net
+
+  oam-frontend:
+    build:
+      context: ./oam-frontend
+      dockerfile: Dockerfile
+    container_name: core-oam-frontend
+    restart: unless-stopped
+    depends_on:
+      oam:
+        condition: service_started
+    environment:
+      - VITE_API_BASE_URL=/api
+    ports:
+      - "${OAM_FRONTEND_PORT:-3001}:80/tcp"
     networks:
       - core-net
 
@@ -747,11 +681,350 @@ services:
     container_name: core-grafana
     restart: unless-stopped
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-change-me}
     volumes:
       - core-grafana-data:/var/lib/grafana
     ports:
       - "3000:3000/tcp"
+    networks:
+      - core-net
+
+  # ========================================================================
+  # REFERENCE ONLY — Free5GC v3.4.0. Never run beside the custom stack.
+  # Start with: docker compose --profile free5gc up -d
+  # ========================================================================
+  mongo:
+    image: mongo:6
+    container_name: core-mongo
+    profiles: ["free5gc"]
+    restart: unless-stopped
+    volumes:
+      - core-mongo-data:/data/db
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+
+  nrf:
+    image: free5gc/nrf:v3.4.0
+    container_name: core-nrf-free5gc
+    profiles: ["free5gc"]
+    restart: unless-stopped
+    environment:
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+      - DB_URI=mongodb://mongo:27017
+    ports:
+      - "18000:8000/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/nnrf-nfm/v1/nf-instances"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  amf:
+    image: free5gc/amf:v3.4.0
+    container_name: core-amf-free5gc
+    profiles: ["free5gc"]
+    restart: unless-stopped
+    environment:
+      - AMF_ADDR=amf
+      - AMF_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+      - GUAMI_PLMN_MCC=${PLMN_MCC:-641}
+      - GUAMI_PLMN_MNC=${PLMN_MNC:-020}
+      - GUAMI_REGION_ID=1
+      - GUAMI_SET_ID=1
+      - TAI_PLMN_MCC=${PLMN_MCC:-641}
+      - TAI_PLMN_MNC=${PLMN_MNC:-020}
+      - TAI_TAC=1
+      - PLMN_SUPPORT_0_MCC=${PLMN_MCC:-641}
+      - PLMN_SUPPORT_0_MNC=${PLMN_MNC:-020}
+      - PLMN_SUPPORT_0_TAC=1
+      - N2_INTERFACE_AMF_ADDR=amf
+      - N2_INTERFACE_AMF_PORT=38412
+      - N2_INTERFACE_GNB_ADDR=gnb
+      - N2_INTERFACE_GNB_PORT=38412
+    ports:
+      - "18080:80/tcp"
+      - "38413:38412/sctp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+
+  smf:
+    image: free5gc/smf:v3.4.0
+    container_name: core-smf-free5gc
+    profiles: ["free5gc"]
+    restart: unless-stopped
+    environment:
+      - SMF_ADDR=smf
+      - SMF_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+      - UPF_ADDR=upf
+      - UPF_PORT=8805
+      - DNS_PRIMARY=${DNS_PRIMARY:-8.8.8.8}
+      - DNS_SECONDARY=${DNS_SECONDARY:-8.8.4.4}
+      - SUBNET_POOL=${SUBNET_POOL:-10.60.0.0/16}
+    ports:
+      - "18081:80/tcp"
+      - "18085:8805/udp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+      upf:
+        condition: service_started
+
+  upf:
+    image: free5gc/upf:v3.4.0
+    container_name: core-upf-free5gc
+    profiles: ["free5gc"]
+    restart: unless-stopped
+    environment:
+      - UPF_ADDR=upf
+      - UPF_PORT=8805
+      - N3_INTERFACE_UPF_ADDR=upf
+      - N3_INTERFACE_UPF_PORT=2152
+      - N4_INTERFACE_UPF_ADDR=upf
+      - N4_INTERFACE_UPF_PORT=8805
+      - N4_INTERFACE_SMF_ADDR=smf
+      - N4_INTERFACE_SMF_PORT=8805
+    ports:
+      - "18152:2152/udp"
+      - "18086:8805/udp"
+    networks:
+      - core-net
+    depends_on:
+      smf:
+        condition: service_started
+
+  ausf:
+    image: free5gc/ausf:v3.4.0
+    container_name: core-ausf-free5gc
+    profiles: ["free5gc"]
+    restart: unless-stopped
+    environment:
+      - AUSF_ADDR=ausf
+      - AUSF_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+    ports:
+      - "18082:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+
+  udm:
+    image: free5gc/udm:v3.4.0
+    container_name: core-udm-free5gc
+    profiles: ["free5gc"]
+    restart: unless-stopped
+    environment:
+      - UDM_ADDR=udm
+      - UDM_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+      - DB_URI=mongodb://mongo:27017
+    ports:
+      - "18083:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+
+  pcf:
+    image: free5gc/pcf:v3.4.0
+    container_name: core-pcf-free5gc
+    profiles: ["free5gc"]
+    restart: unless-stopped
+    environment:
+      - PCF_ADDR=pcf
+      - PCF_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+    ports:
+      - "18084:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+
+  chf:
+    image: free5gc/chf:v3.4.0
+    container_name: core-chf-free5gc
+    profiles: ["free5gc"]
+    restart: unless-stopped
+    environment:
+      - CHF_ADDR=chf
+      - CHF_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+    ports:
+      - "18087:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+
+  # ========================================================================
+  # Custom AMF / LMF / MME (service-based side only, see /scope on each)
+  # ========================================================================
+  custom-amf:
+    build:
+      context: .
+      dockerfile: docker/amf/Dockerfile
+    container_name: core-custom-amf
+    restart: unless-stopped
+    depends_on:
+      custom-nrf:
+        condition: service_healthy
+      custom-lmf:
+        condition: service_healthy
+    environment:
+      - AMF_HOST=0.0.0.0
+      - AMF_PORT=${AMF_PORT:-8001}
+      - AMF_PUBLIC_HOST=${AMF_PUBLIC_HOST:-amf.core.local}
+      - AMF_IPV4=${AMF_IPV4:-}
+      - AMF_LMF_TIMEOUT=${AMF_LMF_TIMEOUT:-5}
+      - AMF_DISCOVERY_TTL=${AMF_DISCOVERY_TTL:-10}
+      - NRF_ADDR=custom-nrf
+      - NRF_PORT=${CUSTOM_NRF_PORT:-8000}
+      - NRF_HEARTBEAT_TIMER=${NRF_HEARTBEAT_TIMER:-30}
+      - PLMN_MCC=${PLMN_MCC:-641}
+      - PLMN_MNC=${PLMN_MNC:-020}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./amf/src:/app/src
+      - ./corelib:/app/corelib:ro
+    ports:
+      - "${AMF_PORT:-8001}:8001/tcp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8001/health',timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    command: ["python", "/app/src/amf_server.py"]
+    networks:
+      - core-net
+
+  custom-lmf:
+    build:
+      context: .
+      dockerfile: docker/lmf/Dockerfile
+    container_name: core-custom-lmf
+    restart: unless-stopped
+    depends_on:
+      custom-nrf:
+        condition: service_healthy
+    environment:
+      - LMF_HOST=0.0.0.0
+      - LMF_PORT=${LMF_PORT:-8003}
+      - LMF_PUBLIC_HOST=${LMF_PUBLIC_HOST:-lmf.core.local}
+      - LMF_IPV4=${LMF_IPV4:-}
+      - LMF_PROVIDER_URL=${LMF_PROVIDER_URL:-}
+      - LMF_PROVIDER_TOKEN=${LMF_PROVIDER_TOKEN:-}
+      - LMF_PROVIDER_TIMEOUT=${LMF_PROVIDER_TIMEOUT:-8}
+      - NRF_ADDR=custom-nrf
+      - NRF_PORT=${CUSTOM_NRF_PORT:-8000}
+      - NRF_HEARTBEAT_TIMER=${NRF_HEARTBEAT_TIMER:-30}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./lmf/src:/app/src
+      - ./corelib:/app/corelib:ro
+    ports:
+      - "${LMF_PORT:-8003}:8003/tcp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8003/health',timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    command: ["python", "/app/src/lmf_server.py"]
+    networks:
+      - core-net
+
+  custom-mme:
+    build:
+      context: .
+      dockerfile: docker/mme/Dockerfile
+    container_name: core-custom-mme
+    restart: unless-stopped
+    environment:
+      - MME_HOST=0.0.0.0
+      - MME_SLG_PORT=${MME_SLG_PORT:-3875}
+      - MME_HTTP_PORT=${MME_HTTP_PORT:-8075}
+      - MME_ORIGIN_HOST=${MME_ORIGIN_HOST:-mme.core.local}
+      - MME_ORIGIN_REALM=${MME_ORIGIN_REALM:-core.local}
+      - MME_PRODUCT_NAME=${MME_PRODUCT_NAME:-Hamiltel-MME}
+      - DIAMETER_VENDOR_ID=${DIAMETER_VENDOR_ID:-10415}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./mme/src:/app/src
+      - ./corelib:/app/corelib:ro
+    ports:
+      - "${MME_SLG_PORT:-3875}:3875/tcp"
+      - "${MME_HTTP_PORT:-8075}:8075/tcp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8075/health',timeout=2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    command: ["python", "/app/src/mme_server.py"]
     networks:
       - core-net
 

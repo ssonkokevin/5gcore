@@ -12,7 +12,8 @@ RUN pip install --no-cache-dir \
     aiofiles==23.2.1 \
     python-dotenv==1.0.0 \
     requests==2.31.0 \
-    pycryptodome==3.19.0
+    pycryptodome==3.19.0 \
+    cryptography==41.0.7
 
 COPY ./udm/src/ /app/src/
 COPY ./udm/config/ /app/config/

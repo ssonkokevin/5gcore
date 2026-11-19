@@ -1,0 +1,117 @@
+{
+  "traffContDecs": {
+    "default-tc": {
+      "tcId": "default-tc",
+      "flowStatus": "ENABLED",
+      "redirectInfo": null,
+      "addRedirectInfo": [],
+      "muteNotif": false,
+      "trafficSteeringPolIdDl": "",
+      "trafficSteeringPolIdUl": "",
+      "routeToLocs": [],
+      "maxAllowedUpLat": 0,
+      "metadata": "",
+      "simConnInd": false,
+      "simConnTerm": false,
+      "upPathChgEvent": false
+    },
+    "ims-tc": {
+      "tcId": "ims-tc",
+      "flowStatus": "ENABLED",
+      "redirectInfo": null,
+      "addRedirectInfo": [],
+      "muteNotif": false,
+      "trafficSteeringPolIdDl": "",
+      "trafficSteeringPolIdUl": "",
+      "routeToLocs": [],
+      "maxAllowedUpLat": 0,
+      "metadata": "",
+      "simConnInd": false,
+      "simConnTerm": false,
+      "upPathChgEvent": false
+    },
+    "video-tc": {
+      "tcId": "video-tc",
+      "flowStatus": "ENABLED",
+      "redirectInfo": null,
+      "addRedirectInfo": [],
+      "muteNotif": true,
+      "trafficSteeringPolIdDl": "",
+      "trafficSteeringPolIdUl": "",
+      "routeToLocs": [],
+      "maxAllowedUpLat": 0,
+      "metadata": "",
+      "simConnInd": false,
+      "simConnTerm": false,
+      "upPathChgEvent": false
+    },
+    "social-tc": {
+      "tcId": "social-tc",
+      "flowStatus": "ENABLED",
+      "redirectInfo": null,
+      "addRedirectInfo": [],
+      "muteNotif": true,
+      "trafficSteeringPolIdDl": "",
+      "trafficSteeringPolIdUl": "",
+      "routeToLocs": [],
+      "maxAllowedUpLat": 0,
+      "metadata": "",
+      "simConnInd": false,
+      "simConnTerm": false,
+      "upPathChgEvent": false
+    },
+    "gaming-tc": {
+      "tcId": "gaming-tc",
+      "flowStatus": "ENABLED",
+      "redirectInfo": null,
+      "addRedirectInfo": [],
+      "muteNotif": false,
+      "trafficSteeringPolIdDl": "",
+      "trafficSteeringPolIdUl": "",
+      "routeToLocs": [],
+      "maxAllowedUpLat": 0,
+      "metadata": "",
+      "simConnInd": false,
+      "simConnTerm": false,
+      "upPathChgEvent": false
+    },
+    "blocked-app-tc": {
+      "tcId": "blocked-app-tc",
+      "flowStatus": "DISABLED",
+      "redirectInfo": {
+        "redirectEnabled": true,
+        "redirectAddressType": "IPV4_ADDR",
+        "redirectServerAddress": "10.0.0.100:8080/blocked.html"
+      },
+      "addRedirectInfo": [],
+      "muteNotif": false,
+      "trafficSteeringPolIdDl": "",
+      "trafficSteeringPolIdUl": "",
+      "routeToLocs": [],
+      "maxAllowedUpLat": 0,
+      "metadata": "",
+      "simConnInd": false,
+      "simConnTerm": false,
+      "upPathChgEvent": false
+    },
+    "redirect-portal-tc": {
+      "tcId": "redirect-portal-tc",
+      "flowStatus": "ENABLED",
+      "redirectInfo": {
+        "redirectEnabled": true,
+        "redirectAddressType": "IPV4_ADDR",
+        "redirectServerAddress": "10.0.0.100:8080/portal.html"
+      },
+      "addRedirectInfo": [],
+      "muteNotif": false,
+      "trafficSteeringPolIdDl": "",
+      "trafficSteeringPolIdUl": "",
+      "routeToLocs": [],
+      "maxAllowedUpLat": 0,
+      "metadata": "",
+      "simConnInd": false,
+      "simConnTerm": false,
+      "upPathChgEvent": false
+    }
+  }
+}

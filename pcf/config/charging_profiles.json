@@ -1,0 +1,82 @@
+{
+  "chgDecs": {
+    "default-charging": {
+      "chgId": "default-charging",
+      "meteringMethod": "VOLUME",
+      "offline": true,
+      "online": false,
+      "ratingGroup": 100,
+      "serviceId": 1,
+      "sponsorId": "",
+      "appSvcProvId": "",
+      "afChargingIdentifier": "",
+      "reportingLevel": "RATING_GROUP_LEVEL",
+      "sdfHandl": "NO_CREDIT_CONTROL"
+    },
+    "ims-charging": {
+      "chgId": "ims-charging",
+      "meteringMethod": "DURATION",
+      "offline": true,
+      "online": false,
+      "ratingGroup": 10,
+      "serviceId": 1,
+      "sponsorId": "",
+      "appSvcProvId": "",
+      "afChargingIdentifier": "",
+      "reportingLevel": "RATING_GROUP_LEVEL",
+      "sdfHandl": "NO_CREDIT_CONTROL"
+    },
+    "video-charging": {
+      "chgId": "video-charging",
+      "meteringMethod": "VOLUME",
+      "offline": true,
+      "online": true,
+      "ratingGroup": 200,
+      "serviceId": 2,
+      "sponsorId": "",
+      "appSvcProvId": "",
+      "afChargingIdentifier": "",
+      "reportingLevel": "RATING_GROUP_LEVEL",
+      "sdfHandl": "NON_BLOCKING"
+    },
+    "social-charging": {
+      "chgId": "social-charging",
+      "meteringMethod": "VOLUME",
+      "offline": true,
+      "online": false,
+      "ratingGroup": 300,
+      "serviceId": 3,
+      "sponsorId": "",
+      "appSvcProvId": "",
+      "afChargingIdentifier": "",
+      "reportingLevel": "RATING_GROUP_LEVEL",
+      "sdfHandl": "NO_CREDIT_CONTROL"
+    },
+    "gaming-charging": {
+      "chgId": "gaming-charging",
+      "meteringMethod": "VOLUME",
+      "offline": true,
+      "online": true,
+      "ratingGroup": 400,
+      "serviceId": 4,
+      "sponsorId": "",
+      "appSvcProvId": "",
+      "afChargingIdentifier": "",
+      "reportingLevel": "RATING_GROUP_LEVEL",
+      "sdfHandl": "BLOCKING"
+    },
+    "sponsored-video-charging": {
+      "chgId": "sponsored-video-charging",
+      "meteringMethod": "VOLUME",
+      "offline": false,
+      "online": true,
+      "ratingGroup": 500,
+      "serviceId": 5,
+      "sponsorId": "sponsor123",
+      "appSvcProvId": "provider456",
+      "afChargingIdentifier": "",
+      "reportingLevel": "SPONSORED_CONNECTIVITY_LEVEL",
+      "sdfHandl": "NON_BLOCKING"
+    }
+  }
+}

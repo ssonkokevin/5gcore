@@ -1,0 +1,74 @@
+{
+  "umDecs": {
+    "default-um": {
+      "umId": "default-um",
+      "volumeThreshold": "1073741824",
+      "volumeThresholdUplink": "536870912",
+      "volumeThresholdDownlink": "536870912",
+      "timeThreshold": 3600,
+      "monitoringTime": 86400,
+      "nextVolThreshold": "1073741824",
+      "nextVolThresholdUplink": "536870912",
+      "nextVolThresholdDownlink": "536870912",
+      "nextTimeThreshold": 3600,
+      "inactivityTime": 300,
+      "exUsagePccRuleIds": []
+    },
+    "video-um": {
+      "umId": "video-um",
+      "volumeThreshold": "5368709120",
+      "volumeThresholdUplink": "1073741824",
+      "volumeThresholdDownlink": "4294967296",
+      "timeThreshold": 7200,
+      "monitoringTime": 86400,
+      "nextVolThreshold": "5368709120",
+      "nextVolThresholdUplink": "1073741824",
+      "nextVolThresholdDownlink": "4294967296",
+      "nextTimeThreshold": 7200,
+      "inactivityTime": 600,
+      "exUsagePccRuleIds": []
+    },
+    "social-um": {
+      "umId": "social-um",
+      "volumeThreshold": "1073741824",
+      "volumeThresholdUplink": "536870912",
+      "volumeThresholdDownlink": "536870912",
+      "timeThreshold": 3600,
+      "monitoringTime": 86400,
+      "nextVolThreshold": "1073741824",
+      "nextVolThresholdUplink": "536870912",
+      "nextVolThresholdDownlink": "536870912",
+      "nextTimeThreshold": 3600,
+      "inactivityTime": 300,
+      "exUsagePccRuleIds": []
+    },
+    "gaming-um": {
+      "umId": "gaming-um",
+      "volumeThreshold": "2147483648",
+      "volumeThresholdUplink": "1073741824",
+      "volumeThresholdDownlink": "1073741824",
+      "timeThreshold": 1800,
+      "monitoringTime": 86400,
+      "nextVolThreshold": "2147483648",
+      "nextVolThresholdUplink": "1073741824",
+      "nextVolThresholdDownlink": "1073741824",
+      "nextTimeThreshold": 1800,
+      "inactivityTime": 120,
+      "exUsagePccRuleIds": []
+    },
+    "night-bundle-um": {
+      "umId": "night-bundle-um",
+      "volumeThreshold": "5368709120",
+      "volumeThresholdUplink": "1073741824",
+      "volumeThresholdDownlink": "4294967296",
+      "timeThreshold": 14400,
+      "monitoringTime": 14400,
+      "nextVolThreshold": "5368709120",
+      "nextVolThresholdUplink": "1073741824",
+      "nextVolThresholdDownlink": "4294967296",
+      "nextTimeThreshold": 14400,
+      "inactivityTime": 300,
+      "exUsagePccRuleIds": []
+    }
+  }
+}

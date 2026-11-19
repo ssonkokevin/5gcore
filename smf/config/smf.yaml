@@ -1,23 +1,90 @@
 smf:
-  host: 0.0.0.0
-  port: 7777
-  realm: core.local
-  nrf_addr: http://nrf:7777
-  plmn:
-    mcc: "001"
-    mnc: "01"
-  snssai:
-    - sst: 1
-      sd: "000001"
-  dnn: internet
-  session:
-    subnet: 10.45.0.0/16
-    gateway: 10.45.0.1
-    dns: 8.8.8.8,8.8.4.4
+  host: "0.0.0.0"
+  sbi_port: 7777
+  pfcp_port: 8805
+  gtpc_port: 2123
+  tls:
+    enabled: false
+    cert_file: "/app/certs/smf.crt"
+    key_file: "/app/certs/smf.key"
+  nrf:
+    endpoint: "http://nrf:8080"
+    registration_interval: 30
+  udm:
+    endpoint: "http://udm:8080"
+  chf:
+    endpoint: "http://chf:8080"
+  pcf:
+    endpoint: "http://pcf:7777"
+  upf:
+    selection:
+      strategy: "topology"  # topology, load, static
+      static_upfs:
+        - "upf:8805"
+    topology_file: "/app/config/upf_topology.json"
+  ip_pools:
+    - name: "default-ipv4"
+      cidr: "10.60.0.0/16"
+      gateway: "10.60.0.1"
+      dns_primary: "8.8.8.8"
+      dns_secondary: "8.8.4.4"
+    - name: "default-ipv6"
+      cidr: "2001:db8:60::/48"
+      gateway: "2001:db8:60::1"
+      dns_primary: "2001:4860:4860::8888"
+      dns_secondary: "2001:4860:4860::8844"
+  dnn_configs:
+    internet:
+      apn: "internet"
+      ip_pools: ["default-ipv4", "default-ipv6"]
+      default_5qi: 9
+      default_arp:
+        priority_level: 8
+        preempt_cap: "NOT_PREEMPT"
+        preempt_vuln: "PREEMPTABLE"
+      session_ambr:
+        uplink: "1000000000"
+        downlink: "1000000000"
+      pcc_rules: ["default-internet"]
+      charging_characteristics: "1"
+      allowed_sst: [1, 2]
+      ssc_modes: [1, 2, 3]
+      pdu_session_types: ["IPv4", "IPv6", "IPv4v6"]
+      max_pdu_sessions: 10000
+    ims:
+      apn: "ims"
+      ip_pools: ["default-ipv4", "default-ipv6"]
+      default_5qi: 5
+      default_arp:
+        priority_level: 15
+        preempt_cap: "MAY_PREEMPT"
+        preempt_vuln: "NOT_PREEMPTABLE"
+      session_ambr:
+        uplink: "384000"
+        downlink: "384000"
+      pcc_rules: ["ims-signalling"]
+      charging_characteristics: "2"
+      allowed_sst: [1]
+      ssc_modes: [1, 2]
+      pdu_session_types: ["IPv4", "IPv6", "IPv4v6"]
+      max_pdu_sessions: 1000
+  eps_interworking:
+    enabled: true
+    pgw_c_fqdn: "pgw.example.com"
+    pgw_c_ipv4: "10.0.0.20"
+    s5_s8_port: 2123
+    gx_endpoint: "http://pcf:7777"  # Reuse PCF for Gx
+    gy_endpoint: "http://ocs:3869"
+    apn_mapping:
+      "internet": "internet"
+      "ims": "ims"
+  log_level: "INFO"
+  supported_features: "ffff"
   n4:
-    pfcp_server: 0.0.0.0
-    pfcp_client_upf: upf
-    pfcp_port: 8805
-  n2:
-    amf_addr: amf
-  serving_area: [site-a]
+    heartbeat_interval: 10
+    retransmission_timeout: 1
+    max_retries: 3
+  n11:
+    request_timeout: 30
+  gtpc:
+    sequence_range: 1000000
