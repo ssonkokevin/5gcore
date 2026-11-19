@@ -3,9 +3,11 @@ FROM python:3.11-slim
 WORKDIR /app
 
 RUN pip install --no-cache-dir \
-    mysql-connector-python==8.1.0
+    mysql-connector-python==8.1.0 \
+    pycryptodome==3.19.0
 
 COPY ./map_sccp/src/ /app/src/
+COPY ./corelib/ /app/corelib/
 
 EXPOSE 2905/tcp
 EXPOSE 2905/udp

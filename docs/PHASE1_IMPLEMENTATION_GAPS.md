@@ -124,8 +124,8 @@ services, never started with the custom stack.
 | 4 | `custom-nrf` | 8000 | Built | TS 29.510 register/patch/delete/discover/subscribe |
 | 5 | `osmo-stp` | 2905 sctp/udp | Partial | Real M3UA STP; vendor route table must be replaced |
 | 6 | `dra` | 3868 | **Stub** | Route model only; no socket, no relay, no CEA |
-| 7 | `diameter-s6a-cx` | 3880 | Partial | S6a/Cx Diameter server for HSS; needs 4G peers to be exercised |
-| 8 | `map-sccp` | 2906 | Partial | SCCP/TCAP/MAP application engine; not SIGTRAN-conformance tested |
+| 7 | `diameter-s6a-cx` | 3880 | Partial | S6a SAI returns real Milenage EPS vectors with CAS SQN; other procedures still need a 4G peer |
+| 8 | `map-sccp` | 2906 | Partial | SCCP/TCAP/MAP engine; SAI returns real UMTS quintets with CAS SQN; not SIGTRAN-conformance tested |
 | 9 | `camel` | 2907 | Partial | CAMEL Phases 1-4 state machine; no live gsmSSF |
 | 10 | `ocs` | 3870 | Partial | Gy CCR-I/U/T client; no real CHF |
 | 11 | `scp` | 3871 / 2908 | Partial | CAMEL/INAP service logic; no SBI SCP role |
@@ -215,6 +215,18 @@ AUSF rather than UDM.
 - UDR (`Nudr`, TS 29.504) is extracted for the authentication subscription:
   credentials, AMF and SQN, with strong ETags and conditional PUT/PATCH. The
   UDM's three vector paths and the HSS vector path read and advance through it.
+- One subscriber, three faces: the S6a and MAP services derive their vectors
+  from the same `tbl_subscriber` row through `corelib.milenage` and advance SQN
+  with `UPDATE ... WHERE imsi=%s AND sqn=%s`, so the Nudm, S6a and Gr faces
+  cannot issue the same SQN twice. The Diameter header, AVP length and
+  Authentication-Info encoding were corrected to RFC 6733 and TS 29.272
+  (Authentication-Info 1413, E-UTRAN-Vector 1414, RAND/XRES/AUTN/KASME
+  1447-1450).
+- Known gap: S6a Re-synchronization-Info is refused with `5012` because this
+  build does not retain the RAND of the last issued vector, and MAC-S cannot be
+  checked without it. MAP request arguments are still located by scanning for
+  the encoded IMSI rather than decoded ASN.1, and MAP SAI always returns UMTS
+  quintuplets (no GSM triplet branch).
 - Remaining: move the other Nudr resources (access-and-mobility, session
   management, policy data) behind the UDR so PCF/SMF stop reading `hssdb`
   directly.

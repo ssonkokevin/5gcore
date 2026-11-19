@@ -22,10 +22,19 @@ import logging
 import os
 import secrets
 import struct
+import sys
 import json
 import mysql.connector
 from typing import Optional, Dict, List, Tuple
 from enum import IntEnum
+
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+_APP_DIR = os.path.dirname(_SRC_DIR)
+for _path in (_APP_DIR, _SRC_DIR):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from corelib.milenage import CryptoUnavailable, Milenage  # noqa: E402
 
 logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")))
 logger = logging.getLogger("map-sccp")
@@ -297,49 +306,30 @@ def encode_tcap_query(invoke_id: int, operation_code: int, parameter_bytes: byte
     return outer
 
 
+def _ber_len(length: int) -> bytes:
+    """BER definite length (short form below 128, one-byte long form above)."""
+    if length < 128:
+        return bytes([length])
+    if length < 256:
+        return bytes([0x81, length])
+    return bytes([0x82, length >> 8, length & 0xFF])
+
+
 def encode_tcap_response(invoke_id: int, operation_code: int, result_bytes: bytes, error_code: Optional[int] = None) -> bytes:
     """Encode TCAP RESPONSE message."""
     if error_code is not None:
         # Error component
-        component = bytes([0x6A])  # Error tag
-        component += bytes([4])  # Length
-        component += bytes([0x02])  # Invoke ID tag
-        component += bytes([1])
-        component += bytes([invoke_id])
-        component += bytes([0x02])  # Error code tag
-        component += bytes([1])
-        component += bytes([error_code])
+        content = bytes([0x02, 0x01, invoke_id, 0x02, 0x01, error_code])
+        component = bytes([0x6A]) + _ber_len(len(content)) + content  # Error tag
     else:
         # Return result component
-        component = bytes([0x62])  # Return result tag
-        component += bytes([4])  # Length
-        component += bytes([0x02])  # Invoke ID tag
-        component += bytes([1])
-        component += bytes([invoke_id])
-        component += bytes([0x02])  # Operation code tag
-        component += bytes([1])
-        component += bytes([operation_code])
-    
-    component += result_bytes
-    
+        content = bytes([0x02, 0x01, invoke_id, 0x02, 0x01, operation_code]) + result_bytes
+        component = bytes([0x62]) + _ber_len(len(content)) + content  # Return result tag
+
     # Wrap in TCAP response
-    response = bytes([TCAP_MSG_TYPE_RESPONSE])
-    resp_len = len(component)
-    if resp_len < 128:
-        response += bytes([resp_len])
-    else:
-        response += bytes([0x81, resp_len])
-    response += component
-    
-    outer = bytes([0x62])  # Response tag
-    outer_len = len(response)
-    if outer_len < 128:
-        outer += bytes([outer_len])
-    else:
-        outer += bytes([0x81, outer_len])
-    outer += response
-    
-    return outer
+    response = bytes([TCAP_MSG_TYPE_RESPONSE]) + _ber_len(len(component)) + component
+
+    return bytes([0x62]) + _ber_len(len(response)) + response
 
 
 def decode_tcap(data: bytes) -> List[Dict]:
@@ -423,8 +413,8 @@ def decode_tcap(data: bytes) -> List[Dict]:
 
 def encode_imsi(imsi: str) -> bytes:
     """Encode IMSI as BCD."""
-    # Pad to odd length
-    if len(imsi) % 2 == 0:
+    # Pad to an even number of digits (15-digit IMSIs get a trailing F)
+    if len(imsi) % 2 == 1:
         imsi = imsi + "F"
     
     bcd = b""
@@ -442,7 +432,7 @@ def encode_msisdn(msisdn: str) -> bytes:
     nai = 0x04  # International number
     
     digit_count = len(msisdn)
-    if digit_count % 2 == 0:
+    if digit_count % 2 == 1:
         digit_count_str = msisdn + "F"
     else:
         digit_count_str = msisdn
@@ -523,6 +513,69 @@ def get_supplementary_services(imsi: str) -> List[Dict]:
 
 
 # ============================================================================
+# Authentication vector helpers (TS 29.002 §7.6, TS 33.102 §6.3)
+# ============================================================================
+
+def _milenage(sub: Dict) -> Tuple[Milenage, bytes, bytes]:
+    key_hex = sub.get("ki") or sub.get("k")
+    if not key_hex:
+        raise ValueError("no Ki/K")
+    key = bytes.fromhex(key_hex)
+    if len(key) != 16:
+        raise ValueError("Ki must be 128 bits")
+    if sub.get("opc"):
+        milenage = Milenage(bytes.fromhex(sub["opc"]))
+    elif sub.get("op"):
+        milenage = Milenage.from_op(bytes.fromhex(sub["op"]), key)
+    else:
+        raise ValueError("no OPc/OP")
+    amf_hex = (sub.get("amf") or "8000").ljust(4, "0")
+    return milenage, key, bytes.fromhex(amf_hex)
+
+
+def _advance_sqn(imsi: str, expected: int, new_sqn: int) -> bool:
+    """Compare-and-set the SQN shared with the S6a and Nudm faces."""
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tbl_subscriber SET sqn=%s WHERE imsi=%s AND sqn=%s",
+            (new_sqn, imsi, expected),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        conn.close()
+
+
+def encode_quintuplet(vector: Dict[str, bytes]) -> bytes:
+    """AuthenticationQuintuplet (TS 29.002 §7.6.1.1).
+
+    SEQUENCE { rand, xres, ck, ik, autn } with context-specific tags
+    [0]..[4]; XRES may be 4-16 octets, here the 8-octet Milenage f2 output.
+    """
+    body = b"".join([
+        bytes([0x80, len(vector["rand"])]) + vector["rand"],
+        bytes([0x81, len(vector["res"])]) + vector["res"],
+        bytes([0x82, len(vector["ck"])]) + vector["ck"],
+        bytes([0x83, len(vector["ik"])]) + vector["ik"],
+        bytes([0x84, len(vector["autn"])]) + vector["autn"],
+    ])
+    return bytes([0x30, len(body)]) + body
+
+
+def encode_sai_result(vectors: List[Dict[str, bytes]]) -> bytes:
+    """SendAuthenticationInfoRes: SEQUENCE { authenticationSetList }.
+
+    authenticationSetList is a CHOICE; the UMTS branch is quintupletList [1]
+    (TS 29.002 §7.6.1.1).
+    """
+    quintuplets = b"".join(encode_quintuplet(vector) for vector in vectors)
+    set_list = bytes([0xA1, len(quintuplets)]) + quintuplets
+    return bytes([0x30, len(set_list)]) + set_list
+
+
+# ============================================================================
 # MAP Operation Handlers
 # ============================================================================
 
@@ -585,31 +638,25 @@ def handle_sai(parameters: bytes, invoke_id: int) -> bytes:
     
     if not imsi:
         return encode_tcap_response(invoke_id, MAP_OP_SAI, b"", error_code=MAP_ERR_UNKNOWN_SUBSCRIBER)
-    
-    sub = get_subscriber(imsi)
-    if not sub or not sub.get("ki"):
-        return encode_tcap_response(invoke_id, MAP_OP_SAI, b"", error_code=MAP_ERR_DATA_MISSING)
-    
-    # Generate authentication vector (simplified)
-    import hashlib
-    rand = secrets.token_bytes(16)
-    autn = hashlib.sha256(sub["ki"] + rand + f"{sub.get('sqn', 0):012X}" + sub.get("amf", "8000")).digest()[:16]
-    res = hashlib.sha256(sub["ki"] + rand).digest()[:8]
-    ck = hashlib.sha256(sub["ki"] + rand + b"ck").digest()[:16]
-    ik = hashlib.sha256(sub["ki"] + rand + b"ik").digest()[:16]
-    
-    # Build authentication info response
-    result_params = b"".join([
-        # Authentication Info
-        bytes([0x30, 0x2E]),  # Sequence, length
-        bytes([0x04, 0x10]) + rand,  # RAND
-        bytes([0x04, 0x10]) + autn,  # AUTN
-        bytes([0x04, 0x08]) + res,  # RES
-        bytes([0x04, 0x10]) + ck,  # CK
-        bytes([0x04, 0x10]) + ik,  # IK
-    ])
-    
-    return encode_tcap_response(invoke_id, MAP_OP_SAI, result_params)
+
+    for attempt in (1, 2):
+        sub = get_subscriber(imsi)
+        if not sub:
+            return encode_tcap_response(invoke_id, MAP_OP_SAI, b"", error_code=MAP_ERR_UNKNOWN_SUBSCRIBER)
+        try:
+            milenage, key, amf = _milenage(sub)
+            sqn = int(sub.get("sqn") or 0)
+            vector = milenage.generate_eps_av(key, sqn, amf)
+        except CryptoUnavailable:
+            return encode_tcap_response(invoke_id, MAP_OP_SAI, b"", error_code=MAP_ERR_SYSTEM_FAILURE)
+        except (TypeError, ValueError):
+            return encode_tcap_response(invoke_id, MAP_OP_SAI, b"", error_code=MAP_ERR_DATA_MISSING)
+
+        if _advance_sqn(imsi, sqn, sqn + 1):
+            return encode_tcap_response(invoke_id, MAP_OP_SAI, encode_sai_result([vector]))
+        logger.warning("SQN contention for %s on MAP (attempt %d)", imsi, attempt)
+
+    return encode_tcap_response(invoke_id, MAP_OP_SAI, b"", error_code=MAP_ERR_SYSTEM_FAILURE)
 
 
 def handle_isd(parameters: bytes, invoke_id: int) -> bytes:

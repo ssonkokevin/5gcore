@@ -19,10 +19,23 @@ import logging
 import os
 import secrets
 import struct
+import sys
 import json
 import mysql.connector
 from typing import Optional, Dict, List, Tuple
 from enum import IntEnum
+
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+_APP_DIR = os.path.dirname(_SRC_DIR)
+for _path in (_APP_DIR, _SRC_DIR):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from corelib.milenage import (  # noqa: E402
+    CryptoUnavailable,
+    Milenage,
+    plmn_id,
+)
 
 logging.basicConfig(level=getattr(logging, os.getenv("LOG_LEVEL", "INFO")))
 logger = logging.getLogger("diameter-s6a-cx")
@@ -94,12 +107,21 @@ AVP_ECGI = 1640
 AVP_TAI = 1641
 AVP_LOCATION_STAMP = 1642
 AVP_SUBSCRIBED_PERIODIC_RAU_TAU_TIMER = 1459
-AVP_EUTRAN_AUTH_INFO = 1404
-AVP_VISITED_PLMN_ID = 1405
-AVP_AUTHENTICATION_INFO = 1406
-AVP_RESYNC_INFO = 1407
-AVP_UTRAN_AUTH_INFO = 1408
-AVP_GERAN_AUTH_INFO = 1409
+# Authentication AVPs (TS 29.272 §7.3, TS 29.230 §5)
+AVP_EUTRAN_AUTH_INFO = 1414   # E-UTRAN-Vector
+AVP_VISITED_PLMN_ID = 1407
+AVP_AUTHENTICATION_INFO = 1413
+AVP_RESYNC_INFO = 1411
+AVP_REQUESTED_EUTRAN_AUTH_INFO = 1408
+AVP_NUMBER_OF_REQUESTED_VECTORS = 1410
+AVP_IMMEDIATE_RESPONSE_PREFERRED = 1412
+AVP_ITEM_NUMBER = 1419
+AVP_RAND = 1447
+AVP_XRES = 1448
+AVP_AUTN = 1449
+AVP_KASME = 1450
+AVP_UTRAN_AUTH_INFO = 1415
+AVP_GERAN_AUTH_INFO = 1416
 AVP_IMS_AUTH_DATA = 1437
 AVP_AUTHENTICATION_SCHEME = 1443
 AVP_PRIVATE_IDENTITY = 1442
@@ -179,39 +201,45 @@ RESULT_DIAMETER_ROAMING_NOT_ALLOWED = 5032
 # ============================================================================
 
 def encode_avp(code: int, flags: int, vendor_id: int, data: bytes) -> bytes:
-    """Encode a Diameter AVP."""
-    avp_len = 8 + len(data)
+    """Encode a Diameter AVP (RFC 6733 §4.1).
+
+    The V bit (0x80) adds the four-octet Vendor-Id field, so the declared
+    length must include it.
+    """
+    has_vendor = bool(flags & 0x80)
+    avp_len = (12 if has_vendor else 8) + len(data)
     header = struct.pack("!I", (code << 8) | flags)
     header += struct.pack("!I", avp_len)
-    header += struct.pack("!I", vendor_id)
+    if has_vendor:
+        header += struct.pack("!I", vendor_id)
     return header + data
 
 
 def encode_uint32_avp(code: int, value: int, vendor_id: int = 0, mandatory: bool = True) -> bytes:
     """Encode an unsigned 32-bit AVP."""
-    flags = 0x80 if mandatory else 0x00  # V bit = 0, M bit
+    flags = (0x80 if vendor_id else 0x00) | (0x40 if mandatory else 0x00)
     data = struct.pack("!I", value)
     return encode_avp(code, flags, vendor_id, data)
 
 
 def encode_utf8_avp(code: int, value: str, vendor_id: int = 0, mandatory: bool = True) -> bytes:
     """Encode a UTF8String AVP."""
-    flags = 0x80 if mandatory else 0x00
+    flags = (0x80 if vendor_id else 0x00) | (0x40 if mandatory else 0x00)
     data = value.encode('utf-8')
     return encode_avp(code, flags, vendor_id, data)
 
 
 def encode_grouped_avp(code: int, sub_avps: bytes, vendor_id: int = 0, mandatory: bool = True) -> bytes:
     """Encode a Grouped AVP."""
-    flags = 0x80 if mandatory else 0x00
+    flags = (0x80 if vendor_id else 0x00) | (0x40 if mandatory else 0x00)
     return encode_avp(code, flags, vendor_id, sub_avps)
 
 
 def decode_avp(data: bytes, offset: int = 0) -> Tuple[int, int, int, int, bytes]:
     """Decode a Diameter AVP. Returns (code, flags, length, vendor_id, data, next_offset)."""
     avp_code = struct.unpack("!I", data[offset:offset+4])[0]
-    code = (avp_code >> 8) & 0xFFFFFF
-    flags = (avp_code >> 24) & 0xFF
+    code = avp_code >> 8
+    flags = avp_code & 0xFF
     avp_len = struct.unpack("!I", data[offset+4:offset+8])[0]
     vendor_id = struct.unpack("!I", data[offset+8:offset+12])[0] if (flags & 0x80) else 0
     
@@ -224,10 +252,9 @@ def decode_avp(data: bytes, offset: int = 0) -> Tuple[int, int, int, int, bytes]
     return code, flags, avp_len, vendor_id, avp_data, next_offset
 
 
-def decode_all_avps(data: bytes) -> List[Dict]:
-    """Decode all AVPs in a Diameter message."""
+def decode_all_avps(data: bytes, offset: int = 0) -> List[Dict]:
+    """Decode all AVPs in a message body (the 20-octet header is already gone)."""
     avps = []
-    offset = 20  # Skip Diameter header
     while offset + 8 <= len(data):
         code, flags, avp_len, vendor_id, avp_data, offset = decode_avp(data, offset)
         avps.append({
@@ -236,6 +263,24 @@ def decode_all_avps(data: bytes) -> List[Dict]:
             "vendor_id": vendor_id,
             "data": avp_data,
             "raw_len": avp_len
+        })
+    return avps
+
+
+def decode_avps(data: bytes) -> List[Dict]:
+    """Decode a run of AVPs that starts at offset 0 (a Grouped AVP payload)."""
+    avps: List[Dict] = []
+    offset = 0
+    while offset + 8 <= len(data):
+        code, flags, avp_len, vendor_id, avp_data, offset = decode_avp(data, offset)
+        if avp_len < 8:
+            break
+        avps.append({
+            "code": code,
+            "flags": flags,
+            "vendor_id": vendor_id,
+            "data": avp_data,
+            "raw_len": avp_len,
         })
     return avps
 
@@ -254,13 +299,16 @@ def avp_get_utf8(avp_data: bytes) -> str:
 # Diameter Message Building
 # ============================================================================
 
-def build_diameter_header(command_code: int, flags: int, app_id: int, hop_by_hop: int, end_to_end: int) -> bytes:
-    """Build Diameter message header."""
-    hdr = struct.pack("!I", (command_code << 8) | flags)
-    hdr += struct.pack("!I", app_id)
-    hdr += struct.pack("!I", hop_by_hop)
-    hdr += struct.pack("!I", end_to_end)
-    return hdr
+def build_diameter_header(command_code: int, flags: int, app_id: int,
+                          hop_by_hop: int, end_to_end: int, message_length: int) -> bytes:
+    """Build the 20-octet Diameter header (RFC 6733 §3)."""
+    return (
+        struct.pack("!I", (0x01 << 24) | message_length)       # Version 1 | Length
+        + struct.pack("!I", (flags << 24) | command_code)      # Flags | Command
+        + struct.pack("!I", app_id)
+        + struct.pack("!I", hop_by_hop)
+        + struct.pack("!I", end_to_end)
+    )
 
 
 def build_diameter_message(command_code: int, flags: int, app_id: int, avps: List[bytes]) -> bytes:
@@ -268,7 +316,7 @@ def build_diameter_message(command_code: int, flags: int, app_id: int, avps: Lis
     hop_by_hop = secrets.randbits(32)
     end_to_end = secrets.randbits(32)
     body = b"".join(avps)
-    hdr = build_diameter_header(command_code, flags, app_id, hop_by_hop, end_to_end)
+    hdr = build_diameter_header(command_code, flags, app_id, hop_by_hop, end_to_end, 20 + len(body))
     return hdr + body
 
 
@@ -345,6 +393,99 @@ def get_ims_subscription(imsi: str) -> Optional[Dict]:
 
 
 # ============================================================================
+# Authentication vector helpers (TS 29.272 §6.3.2, TS 33.401 Annex A.2)
+# ============================================================================
+
+def _serving_network_id(avps: List[Dict]) -> bytes:
+    """Three-octet SN id for the KASME KDF.
+
+    The MME's Visited-PLMN-Id is authoritative; otherwise the configured home
+    PLMN is used (lab default 001/01, never a production 641xx network).
+    """
+    for avp in avps:
+        if avp["code"] == AVP_VISITED_PLMN_ID and len(avp["data"]) == 3:
+            return avp["data"]
+    digits = os.getenv("DIAMETER_SERVING_PLMN", "00101")
+    if len(digits) not in (5, 6) or not digits.isdigit():
+        raise ValueError("DIAMETER_SERVING_PLMN must be MCC+MNC digits, e.g. 00101")
+    return plmn_id(digits[:3], digits[3:])
+
+
+def _milenage(sub: Dict) -> Tuple[Milenage, bytes, bytes]:
+    """Build the Milenage state from one tbl_subscriber row."""
+    key_hex = sub.get("ki") or sub.get("k")
+    if not key_hex:
+        raise ValueError("no Ki/K")
+    key = bytes.fromhex(key_hex)
+    if len(key) != 16:
+        raise ValueError("Ki must be 128 bits")
+    if sub.get("opc"):
+        milenage = Milenage(bytes.fromhex(sub["opc"]))
+    elif sub.get("op"):
+        milenage = Milenage.from_op(bytes.fromhex(sub["op"]), key)
+    else:
+        raise ValueError("no OPc/OP")
+    amf_hex = (sub.get("amf") or "8000").ljust(4, "0")
+    return milenage, key, bytes.fromhex(amf_hex)
+
+
+def _advance_sqn(imsi: str, expected: int, new_sqn: int) -> bool:
+    """Compare-and-set the SQN so two signalling faces cannot reuse a value."""
+    conn = get_db()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tbl_subscriber SET sqn=%s WHERE imsi=%s AND sqn=%s",
+            (new_sqn, imsi, expected),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+    finally:
+        conn.close()
+
+
+def _sai_request(avps: List[Dict]) -> Tuple[Optional[str], int, Optional[bytes]]:
+    """Read IMSI, vector count and resynchronisation info from an AIR."""
+    imsi = None
+    count = 1
+    resync = None
+    for avp in avps:
+        if avp["code"] in (AVP_USER_NAME, AVP_IMSI):
+            try:
+                imsi = avp_get_utf8(avp["data"])
+            except UnicodeDecodeError:
+                imsi = None
+        elif avp["code"] == AVP_REQUESTED_EUTRAN_AUTH_INFO:
+            for child in decode_avps(avp["data"]):
+                if child["code"] == AVP_NUMBER_OF_REQUESTED_VECTORS and len(child["data"]) == 4:
+                    count = avp_get_uint32(child["data"])
+                elif child["code"] == AVP_RESYNC_INFO and child["data"]:
+                    resync = child["data"]
+    return imsi, max(1, min(count, 5)), resync
+
+
+def _sai_answer(vectors: List[Dict]) -> bytes:
+    """Authentication-Info grouped AVP carrying one E-UTRAN-Vector per AV."""
+    vector_avps = []
+    for item, vector in enumerate(vectors):
+        vector_avps.append(encode_grouped_avp(AVP_EUTRAN_AUTH_INFO, b"".join([
+            encode_uint32_avp(AVP_ITEM_NUMBER, item, config.vendor_id),
+            encode_avp(AVP_RAND, 0xC0, config.vendor_id, vector["rand"]),
+            encode_avp(AVP_XRES, 0xC0, config.vendor_id, vector["xres"]),
+            encode_avp(AVP_AUTN, 0xC0, config.vendor_id, vector["autn"]),
+            encode_avp(AVP_KASME, 0xC0, config.vendor_id, vector["k_asme"]),
+        ]), config.vendor_id))
+
+    return build_diameter_message(CMD_SAI, 0x80, APP_3GPP_S6a, [
+        encode_uint32_avp(AVP_RESULT_CODE, RESULT_SUCCESS),
+        encode_uint32_avp(AVP_AUTH_APPLICATION_ID, APP_3GPP_S6a),
+        encode_utf8_avp(AVP_ORIGIN_HOST, config.origin_host),
+        encode_utf8_avp(AVP_ORIGIN_REALM, config.origin_realm),
+        encode_grouped_avp(AVP_AUTHENTICATION_INFO, b"".join(vector_avps), config.vendor_id),
+    ])
+
+
+# ============================================================================
 # S6a Command Handlers
 # ============================================================================
 
@@ -380,57 +521,58 @@ def handle_sri(avps: List[Dict]) -> bytes:
 
 
 def handle_sai(avps: List[Dict]) -> bytes:
-    """Send Authentication Info (SAI) - TS 29.272 §6.3.2."""
-    imsi = None
-    num_vectors = 1
-    for avp in avps:
-        if avp["code"] == AVP_IMSI:
-            imsi = avp_get_utf8(avp["data"])
-        elif avp["code"] == 1458:  # NumberOfRequestedVectors
-            num_vectors = avp_get_uint32(avp["data"])
-    
+    """Send Authentication Info (SAI) - TS 29.272 §6.3.2.
+
+    Vectors are real EPS-AKA vectors from the shared Milenage implementation:
+    KASME = KDF(CK||IK, FC=0x10, SN id, SQN xor AK) per TS 33.401 Annex A.2.
+    The SQN advance is a compare-and-set so the S6a, MAP and Nudm faces cannot
+    issue the same SQN twice.
+    """
+    imsi, count, resync = _sai_request(avps)
+
     if not imsi:
         return build_error_response(CMD_SAI, APP_3GPP_S6a, RESULT_DIAMETER_UNKNOWN_USER, "Missing IMSI")
-    
-    sub = get_subscriber(imsi)
-    if not sub:
-        return build_error_response(CMD_SAI, APP_3GPP_S6a, RESULT_DIAMETER_UNKNOWN_USER, "Unknown subscriber")
-    
-    if not sub.get("ki") or not sub.get("opc"):
-        return build_error_response(CMD_SAI, APP_3GPP_S6a, RESULT_DIAMETER_AUTHENTICATION_REJECTED, "No auth credentials")
-    
-    # Build auth info vectors (simplified - in production call UDM GetHssAV)
-    auth_info_avps = []
-    for i in range(num_vectors):
-        rand = secrets.token_bytes(16)
-        autn = secrets.token_bytes(16)
-        xres = secrets.token_bytes(8)
-        ck = secrets.token_bytes(16)
-        ik = secrets.token_bytes(16)
-        
-        e_utran_info = encode_grouped_avp(AVP_E_UTRAN_AUTH_INFO, b"".join([
-            encode_avp(1405, 0x80, 0, rand),  # RAND
-            encode_avp(1406, 0x80, 0, autn),  # AUTN
-            encode_avp(1407, 0x80, 0, xres),  # XRES
-            encode_avp(1408, 0x80, 0, ck),    # CK
-            encode_avp(1409, 0x80, 0, ik),    # IK
-        ]))
-        auth_info_avps.append(e_utran_info)
-    
-    sub_data_avps = b"".join([
-        encode_avp(AVP_IMSI, 0x80, 0, imsi.encode()),
-        encode_avp(AVP_AUTHENTICATION_INFO, 0x80, 0, b"".join(auth_info_avps)),
-    ])
-    
-    result_avps = [
-        encode_uint32_avp(AVP_RESULT_CODE, RESULT_SUCCESS),
-        encode_uint32_avp(AVP_AUTH_APPLICATION_ID, APP_3GPP_S6a),
-        encode_utf8_avp(AVP_ORIGIN_HOST, config.origin_host),
-        encode_utf8_avp(AVP_ORIGIN_REALM, config.origin_realm),
-        encode_grouped_avp(AVP_USER_DATA, sub_data_avps),
-    ]
-    
-    return build_diameter_message(CMD_SAI, 0x80, APP_3GPP_S6a, result_avps)
+
+    if resync is not None:
+        # MAC-S can only be checked with the RAND of the vector this HSS issued
+        # last (TS 33.102 §6.3.3). This build does not retain that RAND, so it
+        # refuses instead of acknowledging a resync it cannot verify.
+        return build_error_response(
+            CMD_SAI, APP_3GPP_S6a, RESULT_DIAMETER_UNABLE_TO_COMPLY,
+            "AUTS resynchronisation requires the previously issued RAND, which this build does not store",
+        )
+
+    try:
+        sn_id = _serving_network_id(avps)
+    except ValueError as exc:
+        return build_error_response(CMD_SAI, APP_3GPP_S6a, RESULT_DIAMETER_UNABLE_TO_COMPLY, str(exc))
+
+    for attempt in (1, 2):
+        sub = get_subscriber(imsi)
+        if not sub:
+            return build_error_response(CMD_SAI, APP_3GPP_S6a, RESULT_DIAMETER_UNKNOWN_USER, "Unknown subscriber")
+        try:
+            milenage, key, amf = _milenage(sub)
+            sqn = int(sub.get("sqn") or 0)
+            vectors = [
+                milenage.generate_eps_av(key, sqn + index, amf, sn_id)
+                for index in range(count)
+            ]
+        except CryptoUnavailable as exc:
+            return build_error_response(CMD_SAI, APP_3GPP_S6a, RESULT_DIAMETER_UNABLE_TO_COMPLY, str(exc))
+        except (TypeError, ValueError) as exc:
+            return build_error_response(
+                CMD_SAI, APP_3GPP_S6a, RESULT_DIAMETER_AUTHENTICATION_REJECTED,
+                f"Unusable authentication credentials: {exc}",
+            )
+
+        if _advance_sqn(imsi, sqn, sqn + count):
+            return _sai_answer(vectors)
+        logger.warning("SQN contention for %s on S6a (attempt %d)", imsi, attempt)
+
+    return build_error_response(
+        CMD_SAI, APP_3GPP_S6a, RESULT_DIAMETER_UNABLE_TO_COMPLY, "SQN contention, retry",
+    )
 
 
 def handle_isd(avps: List[Dict]) -> bytes:
@@ -728,15 +870,20 @@ class DiameterServer:
                 # Read Diameter header (20 bytes)
                 header_data = await reader.readexactly(20)
                 
-                # Parse header
-                cmd_flags_len = struct.unpack("!I", header_data[0:4])[0]
-                command_code = (cmd_flags_len >> 8) & 0xFFFFFF
-                flags = (cmd_flags_len >> 24) & 0xFF
-                msg_len = struct.unpack("!I", header_data[4:8])[0]
+                # Parse header (RFC 6733 §3): Version|Length, Flags|Command
+                version_length = struct.unpack("!I", header_data[0:4])[0]
+                msg_len = version_length & 0xFFFFFF
+                flags_command = struct.unpack("!I", header_data[4:8])[0]
+                flags = (flags_command >> 24) & 0xFF
+                command_code = flags_command & 0xFFFFFF
                 app_id = struct.unpack("!I", header_data[8:12])[0]
                 hop_by_hop = struct.unpack("!I", header_data[12:16])[0]
                 end_to_end = struct.unpack("!I", header_data[16:20])[0]
-                
+
+                if msg_len < 20:
+                    logger.warning(f"Peer {addr} sent an invalid Diameter length {msg_len}; closing")
+                    break
+
                 # Read remaining body
                 body_len = msg_len - 20
                 if body_len > 0:

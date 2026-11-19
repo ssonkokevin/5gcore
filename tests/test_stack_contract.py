@@ -178,6 +178,27 @@ class TestStaticContracts(unittest.TestCase):
         for token in ("If-Match", "PRECONDITION_REQUIRED", "FOR UPDATE", "AND sqn="):
             self.assertIn(token, source, f"UDR lost its conditional-write guard: {token}")
 
+    def test_signalling_faces_use_shared_milenage_and_cas(self):
+        s6a = (ROOT / "diameter" / "src" / "diameter_server.py").read_text(encoding="utf-8")
+        mapc = (ROOT / "map_sccp" / "src" / "map_sccp_server.py").read_text(encoding="utf-8")
+
+        for name, source in (("S6a", s6a), ("MAP", mapc)):
+            handler = source[source.index("def handle_sai"):source.index("def handle_isd")]
+            self.assertNotIn("hashlib", handler, f"{name} SAI must not derive vectors from a hash")
+            self.assertNotIn("secrets.token_bytes", handler, f"{name} SAI must not invent vector bytes")
+            self.assertIn("generate_eps_av", source)
+            self.assertIn("AND sqn=%s", source)
+
+        self.assertIn("AVP_KASME = 1450", s6a)
+        self.assertIn("AVP_EUTRAN_AUTH_INFO = 1414", s6a)
+        self.assertIn("AVP_AUTHENTICATION_INFO = 1413", s6a)
+
+    def test_signalling_images_carry_corelib(self):
+        for image in ("diameter", "map_sccp"):
+            dockerfile = (ROOT / "docker" / image / "Dockerfile").read_text(encoding="utf-8")
+            self.assertIn("COPY ./corelib/ /app/corelib/", dockerfile)
+            self.assertIn("pycryptodome", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
