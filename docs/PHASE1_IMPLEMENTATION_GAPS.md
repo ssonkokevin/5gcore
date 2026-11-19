@@ -93,7 +93,7 @@ signalling.**
 | Area | State | Notes |
 |---|---|---|
 | Milenage (f1, f1*, f2-f5, f5*) | Built | AES-128, OPc derivation, per-vector SQN increment, fail-closed when pycryptodome is absent |
-| 5G AKA key hierarchy | Built | Kausf/Kseaf/Kamf derivation per TS 33.501 Annex A |
+| 5G AKA key hierarchy | Built (ARPF part) | UDM derives Kausf and returns the HE AV; Kseaf belongs to AUSF, Kamf to AMF (TS 33.501 Annex A) |
 | SUCI de-concealment | Built | Profiles A (X25519) and B (P-256), ANSI X9.63 KDF, AES-CTR, MAC verify, BCD MSIN |
 | `Nudm_SDM` | Built | ~20 data types, DB-backed |
 | `Nudm_UECM` | Built | AMF/3GPP, non-3GPP, SMF registrations, SMSF, IP-SM-GW |
@@ -192,7 +192,8 @@ Initial UE Message carrying a Registration Request and receive a NAS reply.
 - 5GSM transport: relay SM messages to SMF over N11.
 - NAS security: NIA2 (AES-CMAC) integrity, NEA2 (AES-CTR) ciphering, COUNT
   handling, re-play protection.
-- Key hierarchy: AUSF → Kseaf → Kausf, Kamf derived in AMF, KgNB delivery.
+- Key hierarchy (TS 33.501 Annex A): K -> CK/IK -> Kausf (UDM/ARPF) ->
+  Kseaf (AUSF) -> Kamf (AMF) -> KgNB and NAS keys. The AMF never sees Kausf.
 - SUCI: accept `supi-` and `suci-` identities; concealment remains a UDM function.
 
 Acceptance: 5G-AKA completes with a provisioned USIM; Security Mode Complete is
@@ -219,8 +220,9 @@ AUSF rather than UDM.
 
 This is the second-long pole and a buy/build decision.
 
-- Minimum viable: GTP-U decapsulation/encapsulation on N3/N9/N6, PDR/FAR/QER
-  installation from PFCP, UE IP pool, ICMP-first forwarding.
+- Minimum viable: GTP-U decapsulation/encapsulation on N3 and N9, PDR/FAR/QER
+  installation from PFCP, UE IP pool, ICMP-first forwarding. N6 is plain IP
+  towards the data network — no GTP-U there.
 - Recommended: integrate a proven open-source datapath rather than write one
   (free5gc UPF, UPF-EPC/`upg-vpp`, or similar) behind the existing management
   API, and keep the custom PFCP control plane.
@@ -320,7 +322,7 @@ Sequence matters: MME and SGW first (4G), then SGSN/GGSN (2G/3G), then handover.
 | P1B-10 | MSC/MGW: CS core + MAP LCS (SLR/SLA) | TS 23.018, 29.002 | Needed for GMLC MAP path |
 | P1B-11 | E-SMLC + SLs for EPS positioning | TS 23.271, 29.171 | Buy or build decision |
 | P1B-12 | 4G↔5G interworking (N26) | TS 23.501 §5.17 | Only if mobility between RAATs is sold |
-| P1B-13 | GMLC: SLg client to MME, SLh to HSS, MAP Lg/Lh | TS 29.171/29.172 | Replaces the HTTP shims |
+| P1B-13 | GMLC: SLg client to MME, SLh to HSS, MAP Lg/Lh | SLg TS 29.172, SLh TS 29.173, MAP TS 29.002 | Replaces the HTTP shims |
 
 Phase 1B gate: a 4G UE attaches (srsENB/srsEPC-class lab), receives an IP,
 pings, and a GMLC request returns a position through SLg→MME→E-SMLC→SLs.
@@ -392,6 +394,45 @@ Free today and recommended for the new NFs:
 
 All GTP-U and Diameter instances need dedicated IPs per §9.1.
 
+### 9.3 Lab addressing (private, non-production)
+
+Every address below is RFC 1918 and safe to use on the lab VLAN. Nothing here
+contacts the live network.
+
+| Purpose | Range | Notes |
+|---|---|---|
+| Docker bridge `core-net` | 172.20.0.0/16 | Already configured; confirm no overlap with VLAN 404/999 `ip route` |
+| N3 (gNB <-> UPF) | 10.44.60.0/24 | gNB 10.44.60.10, UPF N3 10.44.60.20 |
+| N6 internet DNN | 10.44.61.0/24 | UPF N6 10.44.61.10, gateway 10.44.61.1 |
+| N6 private DNN | 10.44.62.0/24 | VRF `private`; must not route to 10.44.61.0/24 |
+| UE pools | 10.60.0.0/16 (internet), 10.61.0.0/16 (private) | One pool per DNN |
+| Diameter peers (mock) | 10.44.63.10/11 | Two loopback peers to prove relay and failover |
+| M3UA point codes (mock) | PC 1.2.3 (STP), 1.2.4 (HLR mock), 1.2.5 (MSC mock) | Private numbering; replace before any real peer |
+
+Mock peers are deliberately *not* vendor values: they prove that routing,
+parsing and answer correlation work without touching a live network.
+
+### 9.4 Signalling test without a SIM or a radio
+
+Until a USIM and a gNB exist, signalling is proven with mocks and published
+test vectors. This is the fastest path to "messages parse and traverse".
+
+| Layer | Mock / vector | Proves |
+|---|---|---|
+| Milenage | TS 35.208 test sets 1-3 | f1-f5* match the spec bit-for-bit |
+| SUCI | TS 33.501 Annex C test data | Profile A/B concealment and de-concealment |
+| S6a | Diameter test client: CER/AIR/ULR | CEA/AIA/ULA codes, AVPs, session correlation |
+| SLg | Diameter test client: CER/PLR | CEA, PLA 5012 with cause, hop-by-hop match |
+| MAP | M3UA client to the STP: SAI, UL | TCAP dialogue, return result |
+| NGAP | UERANSIM gNB (no radio) | NG Setup, Initial UE Message |
+| PFCP | Scripted N4 client against the SMF/UPF pair | Association, session create/modify/delete, SEID |
+
+Every test writes a pcap into `tests/pcaps/` (git-ignored) so it can be opened
+in Wireshark during a review.
+
+Lab PLMN is **001/01** (or 999/70). Never broadcast 641/020 over the air; any
+over-the-air test needs UCC authorisation and starts with cables and attenuators.
+
 ---
 
 ## 10. Sequencing and indicative effort
@@ -462,7 +503,7 @@ Before any of the above lands, these are real and worth running on the lab VM:
 |---|---|---|
 | NRF discovery | `curl localhost:8000/nnrf-nfm/v1/nf-instances` | AMF, LMF, UDM, PCF, SMF, HSS registered |
 | UDM SDM | `curl localhost:8007/nudm-sdm/v2/641020000000001/am-data` | Subscription JSON |
-| UDM auth | `POST /nudm-ueau/v1/{supi}/security-information/generate-auth-data` | 5G SE AV with Kseaf |
+| UDM auth | `POST /nudm-ueau/v1/{supi}/security-information/generate-auth-data` | 5G HE AV: RAND, AUTN, XRES*, Kausf (AUSF derives HXRES* and Kseaf) |
 | SUCI | `POST /nudm-ueid/v1/deconceal` with a Profile A SUCI | `imsi-...` |
 | GMLC chain | `POST localhost:8082/lcs/location-request` | `failed / NO_LCS_SOURCE` |
 | AMF→LMF | `POST localhost:8001/namf-loc/v1/{supi}/provide-loc-info` | `501 NO_POSITIONING_SOURCE` |
