@@ -907,7 +907,13 @@ class DiameterServer:
                     response = dispatch_command(command_code, app_id, avps)
                 
                 if response:
-                    # Set the end-to-end identifier in the response to match request
+                    # Answers must echo the request's Hop-by-Hop and End-to-End
+                    # identifiers or the peer cannot correlate them (RFC 6733 §3).
+                    response = (
+                        response[:12]
+                        + struct.pack("!II", hop_by_hop, end_to_end)
+                        + response[20:]
+                    )
                     writer.write(response)
                     await writer.drain()
                     logger.debug(f"Sent Diameter response cmd={command_code}")

@@ -6,6 +6,7 @@ recomputes every returned vector from the RAND it received, so a fabricated
 is a compare-and-set: a forced conflict must leave the stored SQN untouched.
 """
 
+import asyncio
 import struct
 import sys
 import types
@@ -246,6 +247,68 @@ class SignallingAuthTest(unittest.TestCase):
         error_code = bytes([0x02, 0x01, map_sccp.MAP_ERR_SYSTEM_FAILURE])
         self.assertIn(error_code, response)
         self.assertEqual(STORE[IMSI]["sqn"], 5)
+
+
+class DiameterWireTest(unittest.TestCase):
+    """SIM-less AIR/AIA over TCP: the envelope, not just the handler."""
+
+    def setUp(self):
+        STORE.clear()
+        REFUSE_UPDATES["on"] = False
+        STORE[IMSI] = subscriber()
+
+    def test_air_answer_over_tcp_echoes_ids_and_carries_real_vectors(self):
+        request_avps = [
+            s6a.encode_avp(s6a.AVP_USER_NAME, 0xC0, s6a.config.vendor_id, IMSI.encode()),
+            s6a.encode_grouped_avp(
+                s6a.AVP_REQUESTED_EUTRAN_AUTH_INFO,
+                s6a.encode_uint32_avp(
+                    s6a.AVP_NUMBER_OF_REQUESTED_VECTORS, 1, s6a.config.vendor_id
+                ),
+                s6a.config.vendor_id,
+            ),
+            s6a.encode_avp(s6a.AVP_VISITED_PLMN_ID, 0xC0, s6a.config.vendor_id, VISITED),
+        ]
+        request = s6a.build_diameter_message(318, 0x80, s6a.APP_3GPP_S6a, request_avps)
+        hop, end_to_end = struct.unpack("!II", request[12:20])
+
+        answer = asyncio.run(self._roundtrip(request))
+
+        self.assertEqual(answer[0], 1, "Version-Length word must start with version 1")
+        self.assertEqual(struct.unpack("!I", answer[0:4])[0] & 0xFFFFFF, len(answer))
+        flags_command = struct.unpack("!I", answer[4:8])[0]
+        self.assertEqual(flags_command & 0xFFFFFF, 318)
+        self.assertTrue((flags_command >> 24) & 0x80, "answer must set the R bit")
+        self.assertEqual(struct.unpack("!II", answer[12:20]), (hop, end_to_end))
+
+        top = {item["code"]: item for item in s6a.decode_avps(answer[20:])}
+        self.assertEqual(struct.unpack("!I", top[s6a.AVP_RESULT_CODE]["data"])[0], 2001)
+
+        grouped = s6a.decode_avps(top[s6a.AVP_AUTHENTICATION_INFO]["data"])[0]
+        fields = {item["code"]: item["data"] for item in s6a.decode_avps(grouped["data"])}
+        expected = Milenage(OPC).generate_eps_av(
+            KI, 5, AMF, VISITED, rand=fields[s6a.AVP_RAND]
+        )
+        self.assertEqual(fields[s6a.AVP_AUTN], expected["autn"])
+        self.assertEqual(fields[s6a.AVP_KASME], expected["k_asme"])
+        self.assertEqual(STORE[IMSI]["sqn"], 6)
+
+    async def _roundtrip(self, request: bytes) -> bytes:
+        server = await asyncio.start_server(s6a.DiameterServer().handle_client, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        try:
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            writer.write(request)
+            await writer.drain()
+            header = await reader.readexactly(20)
+            length = struct.unpack("!I", header[0:4])[0] & 0xFFFFFF
+            body = await reader.readexactly(length - 20)
+            writer.close()
+            await writer.wait_closed()
+            return header + body
+        finally:
+            server.close()
+            await server.wait_closed()
 
 
 if __name__ == "__main__":
