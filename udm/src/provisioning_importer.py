@@ -103,44 +103,11 @@ class SimCardRecord(BaseModel):
 # Key derivation helpers
 # ============================================================================
 def derive_opc_if_needed(op: str, k_or_ki: str) -> Optional[str]:
-    """Derive OPc from OP + K/Ki if OPc not provided."""
+    """Derive OPc = E_K(OP) xor OP (TS 35.206). Fails loudly without AES."""
     if not op or not k_or_ki:
         return None
-    try:
-        from Crypto.Cipher import AES
-        op_bytes = bytes.fromhex(op)
-        k_bytes = bytes.fromhex(k_or_ki)
-        cipher = AES.new(k_bytes, AES.MODE_ECB)
-        return cipher.encrypt(op_bytes).hex().upper()
-    except Exception:
-        import hashlib
-        return hashlib.sha256((op + k_or_ki).encode()).hexdigest()[:32].upper()
-
-
-def derive_5g_keys(k_hex: str, sqn: int, amf_hex: str, opc_hex: Optional[str]) -> dict:
-    """Derive 5G key hierarchy (K_AUSF, K_SEAF, K_ASME)."""
-    try:
-        from Crypto.Cipher import AES
-        from Crypto.Hash import SHA256, HMAC
-        k_bytes = bytes.fromhex(k_hex)
-        amf_bytes = bytes.fromhex(amf_hex)
-        sqn_bytes = sqn.to_bytes(6, 'big')
-        # K_AUSF = f5*(K, RAND) || CK || IK (simplified)
-        import secrets
-        rand = secrets.token_bytes(16)
-        # Use Milenage f5* for AK*
-        # Simplified derivation
-        k_ausf = HMAC.new(k_bytes, b"5G:AUSF" + sqn_bytes, SHA256).digest()[:32].hex().upper()
-        k_seaf = HMAC.new(bytes.fromhex(k_ausf), b"5G:SEAF" + sqn_bytes + amf_bytes, SHA256).digest()[:32].hex().upper()
-        return {"k_ausf": k_ausf, "k_seaf": k_seaf, "k_asme": k_seaf}
-    except Exception:
-        import hashlib
-        base = k_hex + f"{sqn:012X}" + amf_hex
-        return {
-            "k_ausf": hashlib.sha256((base + "ausf").encode()).hexdigest()[:32].upper(),
-            "k_seaf": hashlib.sha256((base + "seaf").encode()).hexdigest()[:32].upper(),
-            "k_asme": hashlib.sha256((base + "asme").encode()).hexdigest()[:32].upper(),
-        }
+    from corelib.milenage import derive_opc
+    return derive_opc(bytes.fromhex(op), bytes.fromhex(k_or_ki)).hex().upper()
 
 
 # ============================================================================
@@ -190,10 +157,8 @@ def provision_sim_card(record: SimCardRecord, batch_id: Optional[str] = None) ->
         if not opc and record.op and (record.k or record.ki):
             opc = derive_opc_if_needed(record.op.upper(), (record.k or record.ki).upper())
 
-        # Derive 5G keys if K provided
+        # Per-authentication keys are never stored against the subscriber.
         keys_5g = {"k_asme": None, "k_seaf": None, "k_ausf": None}
-        if record.k and opc:
-            keys_5g = derive_5g_keys(record.k.upper(), record.sqn, record.amf, opc.upper())
 
         cur_h.execute(
             """INSERT INTO tbl_subscriber

@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir \
 # Copy source and config
 COPY hss/src/nhss_server.py /app/src/nhss_server.py
 COPY hss/config/hss.yaml /app/config/hss.yaml
+COPY ./corelib/ /app/corelib/
 
 EXPOSE 8090
 

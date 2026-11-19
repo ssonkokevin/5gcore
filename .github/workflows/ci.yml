@@ -16,7 +16,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install test dependencies
-        run: pip install pyyaml fastapi httpx cryptography pydantic uvicorn
+        run: pip install pyyaml fastapi httpx cryptography pycryptodome pydantic python-multipart uvicorn
 
       - name: Stack contract checks
         run: python scripts/check_stack.py

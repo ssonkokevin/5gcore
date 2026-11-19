@@ -42,7 +42,7 @@ All Nhss APIs use:
 
 import json
 import os
-import secrets
+import sys
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
@@ -52,13 +52,21 @@ from fastapi import FastAPI, HTTPException, Query, Header, Path as PathParam
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-# Crypto imports for Milenage (TS 33.102, 33.501)
-try:
-    from Crypto.Cipher import AES
-    from Crypto.Hash import SHA256, HMAC
-    CRYPTO_AVAILABLE = True
-except ImportError:
-    CRYPTO_AVAILABLE = False
+# Milenage is shared with the UDM (corelib/milenage.py); the HSS is the ARPF.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from corelib.milenage import (  # noqa: E402
+    CRYPTO_BACKEND,
+    AutsVerificationError,
+    Milenage,
+    derive_opc as _derive_opc,
+)
+
+CRYPTO_AVAILABLE = CRYPTO_BACKEND is not None
+if not CRYPTO_AVAILABLE:
+    raise SystemExit(
+        "CRYPTO_UNAVAILABLE: no AES backend; install pycryptodome (containers) "
+        "or cryptography (host). Refusing to start without Milenage."
+    )
 
 app = FastAPI(
     title="HSS Nhss API (TS 29.563 V20.0.0)",
@@ -97,121 +105,14 @@ NHSS_SCOPES = {
 }
 
 # ============================================================================
-# Milenage / AES Crypto (TS 33.102)
+# Milenage (shared implementation in corelib/milenage.py)
 # ============================================================================
-class MilenageCrypto:
-    R1 = bytes.fromhex("00000000000000000000000000000000")
-    R2 = bytes.fromhex("00000000000000000000000000000001")
-    R3 = bytes.fromhex("00000000000000000000000000000002")
-    R4 = bytes.fromhex("00000000000000000000000000000004")
-    R5 = bytes.fromhex("00000000000000000000000000000008")
-    C1 = bytes.fromhex("00000000000000000000000000000000")
-    C2 = bytes.fromhex("00000000000000000000000000000001")
-    C3 = bytes.fromhex("00000000000000000000000000000002")
-    C4 = bytes.fromhex("00000000000000000000000000000004")
-    C5 = bytes.fromhex("00000000000000000000000000000008")
-
-    def __init__(self, opc: bytes):
-        self.opc = opc
-        self.cipher = AES.new(opc, AES.MODE_ECB)
-
-    def _rotl(self, x: bytes, r: int) -> bytes:
-        val = int.from_bytes(x, 'big')
-        val = ((val << r) | (val >> (128 - r))) & ((1 << 128) - 1)
-        return val.to_bytes(16, 'big')
-
-    def _xor(self, a: bytes, b: bytes) -> bytes:
-        return bytes(x ^ y for x, y in zip(a, b))
-
-    def f1(self, k: bytes, rand: bytes, sqn: bytes, amf: bytes) -> bytes:
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R1)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C1)
-        temp = self._xor(temp, sqn)
-        temp = self._xor(temp, amf.ljust(16, b'\x00'))
-        return self.cipher.encrypt(temp)[:8]
-
-    def f2(self, k: bytes, rand: bytes) -> bytes:
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R2)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C2)
-        return self.cipher.encrypt(temp)[:8]
-
-    def f3(self, k: bytes, rand: bytes) -> bytes:
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R3)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C3)
-        return self.cipher.encrypt(temp)
-
-    def f4(self, k: bytes, rand: bytes) -> bytes:
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R4)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C4)
-        return self.cipher.encrypt(temp)
-
-    def f5(self, k: bytes, rand: bytes) -> bytes:
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R5)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C5)
-        return self.cipher.encrypt(temp)[:6]
-
-    def generate_auth_vector_5g(self, k: bytes, sqn: int, amf: bytes) -> Dict[str, bytes]:
-        rand = secrets.token_bytes(16)
-        sqn_bytes = sqn.to_bytes(6, 'big')
-        res = self.f2(k, rand)
-        xres_star = res + SHA256.new(rand + k).digest()[:24]
-        ak_star = self.f5(k, rand)
-        sqn_xor_ak = self._xor(sqn_bytes, ak_star)
-        mac_a = self.f1(k, rand, sqn_bytes, amf)
-        autn = sqn_xor_ak + amf.ljust(2, b'\x00')[:2] + mac_a
-        return {
-            "rand": rand, "autn": autn, "xres_star": xres_star,
-            "res": res,
-        }
-
-    def generate_auth_vector_4g(self, ki: bytes, sqn: int, amf: bytes) -> Dict[str, bytes]:
-        rand = secrets.token_bytes(16)
-        sqn_bytes = sqn.to_bytes(6, 'big')
-        res = self.f2(ki, rand)
-        ck = self.f3(ki, rand)
-        ik = self.f4(ki, rand)
-        ak = self.f5(ki, rand)
-        sqn_xor_ak = self._xor(sqn_bytes, ak)
-        mac_a = self.f1(ki, rand, sqn_bytes, amf)
-        autn = sqn_xor_ak + amf.ljust(2, b'\x00')[:2] + mac_a
-        k_asme = HMAC.new(ck + ik, b"EPS:KASME" + sqn_bytes, SHA256).digest()
-        return {
-            "rand": rand, "autn": autn, "xres": res, "res": res,
-            "ck": ck, "ik": ik, "k_asme": k_asme,
-        }
-
-    def generate_auth_vector_2g3g(self, ki: bytes, rand: bytes = None) -> Dict[str, bytes]:
-        if rand is None:
-            rand = secrets.token_bytes(16)
-        sres = self.f2(ki, rand)[:4]
-        kc = self.f3(ki, rand)[:8]
-        return {"rand": rand, "sres": sres, "kc": kc}
-
-
-def get_crypto(opc_hex: str) -> MilenageCrypto:
-    if not CRYPTO_AVAILABLE:
-        raise RuntimeError("pycryptodome not available")
-    return MilenageCrypto(bytes.fromhex(opc_hex))
+def get_crypto(opc_hex: str) -> Milenage:
+    return Milenage(bytes.fromhex(opc_hex))
 
 
 def derive_opc(op: str, k: str) -> str:
-    if not CRYPTO_AVAILABLE:
-        import hashlib
-        return hashlib.sha256((op + k).encode()).hexdigest()[:32].upper()
-    op_bytes = bytes.fromhex(op)
-    k_bytes = bytes.fromhex(k)
-    cipher = AES.new(k_bytes, AES.MODE_ECB)
-    return cipher.encrypt(op_bytes).hex().upper()
+    return _derive_opc(bytes.fromhex(op), bytes.fromhex(k)).hex().upper()
 
 
 # ============================================================================
@@ -289,7 +190,7 @@ def health():
         "version": "1.0.0",
         "apis": ["nhss-ueau", "nhss-sdm", "nhss-uecm", "nhss-ee", "nhss-pp"],
         "specs": ["TS 29.563", "TS 23.632", "TS 23.008", "TS 29.272", "TS 29.002"],
-        "crypto": "milenage" if CRYPTO_AVAILABLE else "fallback",
+        "crypto": f"milenage/{CRYPTO_BACKEND}",
     }
 
 
@@ -347,21 +248,40 @@ def nhss_generate_av(req: AvGenerationRequest):
         if not row.get("k") or not row.get("opc"):
             raise HTTPException(status_code=403, detail="AUTHENTICATION_REJECTED: 5G credentials not provisioned")
 
+        if req.authType == "EAP_AKA_PRIME":
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "EAP_AKA_PRIME_NOT_IMPLEMENTED: CK'/IK' derivation (TS 33.402) "
+                    "is not built; refusing to return placeholder vectors"
+                ),
+            )
+
         sqn = row["sqn"]
         amf_bytes = bytes.fromhex(row["amf"])
         k_bytes = bytes.fromhex(row["k"])
+        crypto = get_crypto(row["opc"])
 
-        if CRYPTO_AVAILABLE:
-            crypto = get_crypto(row["opc"])
-            av = crypto.generate_auth_vector_5g(k_bytes, sqn, amf_bytes)
-        else:
-            import hashlib
-            rand = secrets.token_bytes(16)
-            rand_hex = rand.hex().upper()
-            autn = hashlib.sha256((row["k"] + rand_hex + f"{sqn:012X}" + row["amf"]).encode()).hexdigest()[:32].upper()
-            xres_star = hashlib.sha256((row["k"] + rand_hex).encode()).hexdigest()[:64].upper()
-            av = {"rand": rand, "autn": bytes.fromhex(autn), "xres_star": bytes.fromhex(xres_star),
-                  "res": bytes.fromhex(rand_hex[:16])}
+        if req.resynchronizationInfo:
+            try:
+                rand_bytes = bytes.fromhex(req.resynchronizationInfo["rand"])
+                auts_bytes = bytes.fromhex(req.resynchronizationInfo["auts"])
+            except (KeyError, TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400,
+                    detail="RESYNC_INFO_MALFORMED: rand and auts are required hex strings",
+                )
+            try:
+                sqn = crypto.auts_sqn(k_bytes, rand_bytes, auts_bytes)
+            except AutsVerificationError:
+                raise HTTPException(
+                    status_code=403,
+                    detail="AUTS_VERIFICATION_FAILED: MAC-S mismatch",
+                )
+
+        av = crypto.generate_5g_he_av(
+            k_bytes, sqn, amf_bytes, req.servingNetworkName
+        )
 
         # Update SQN (authoritative copy in EPS-UDR)
         new_sqn = sqn + 1
@@ -379,7 +299,7 @@ def nhss_generate_av(req: AvGenerationRequest):
                                            xres_star_5g=VALUES(xres_star_5g), k_ausf_5g=VALUES(k_ausf_5g),
                                            generated_at=VALUES(generated_at), sqn_used=VALUES(sqn_used)""",
                 (imsi, av["rand"].hex().upper(), av["autn"].hex().upper(),
-                 av["xres_star"].hex().upper(), av.get("k_ausf", b"").hex().upper() if isinstance(av.get("k_ausf"), bytes) else "",
+                 av["xres_star"].hex().upper(), av["k_ausf"].hex().upper(),
                  datetime.now(timezone.utc), "milenage", row.get("opc", ""), sqn),
             )
             conn.commit()
@@ -396,20 +316,12 @@ def nhss_generate_av(req: AvGenerationRequest):
         autn_hex = av["autn"].hex().upper()
         xres_hex = av["xres_star"].hex().upper()
 
-        if req.authType == "5G_AKA":
-            return AvGenerationResponse(
-                av5GHeAka=Av5GHeAka(
-                    rand=rand_hex, autn=autn_hex, xresStar=xres_hex,
-                    kausf=av.get("k_ausf", b"").hex().upper() if isinstance(av.get("k_ausf"), bytes) else "",
-                )
+        return AvGenerationResponse(
+            av5GHeAka=Av5GHeAka(
+                rand=rand_hex, autn=autn_hex, xresStar=xres_hex,
+                kausf=av["k_ausf"].hex().upper(),
             )
-        else:
-            return AvGenerationResponse(
-                avEapAkaPrime=AvEapAkaPrime(
-                    rand=rand_hex, autn=autn_hex, xresStar=xres_hex,
-                    kausf=av.get("k_ausf", b"").hex().upper() if isinstance(av.get("k_ausf"), bytes) else "",
-                )
-            )
+        )
     finally:
         conn.close()
 

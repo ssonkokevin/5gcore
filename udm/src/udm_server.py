@@ -51,23 +51,25 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 from pydantic import BaseModel, Field, field_validator
 import redis
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_SRC_DIR))
+sys.path.insert(0, _SRC_DIR)
 import suci as suci_lib  # noqa: E402  (TS 33.501 Annex C de-concealment)
+from corelib.milenage import (  # noqa: E402
+    CRYPTO_BACKEND,
+    AutsVerificationError,
+    Milenage,
+    derive_opc as _derive_opc,
+    plmn_id,
+)
 
 logger = logging.getLogger("udm")
 
-# Crypto imports for Milenage/AES (TS 33.102, 33.501)
-try:
-    from Crypto.Cipher import AES
-    from Crypto.Hash import SHA256, HMAC
-    CRYPTO_AVAILABLE = True
-except ImportError:
-    CRYPTO_AVAILABLE = False
-
+CRYPTO_AVAILABLE = CRYPTO_BACKEND is not None
 if not CRYPTO_AVAILABLE:
     raise SystemExit(
-        "CRYPTO_UNAVAILABLE: pycryptodome is required for Milenage vectors; "
-        "refusing to start. Install pycryptodome (docker/udm/Dockerfile)."
+        "CRYPTO_UNAVAILABLE: no AES backend; install pycryptodome (containers) "
+        "or cryptography (host). Refusing to start without Milenage."
     )
 
 app = FastAPI(
@@ -98,233 +100,26 @@ OPERATOR_KEY = bytes.fromhex(os.getenv("OPERATOR_KEY", "00" * 16))  # OP/OPc def
 
 
 # ============================================================================
-# Milenage / AES Crypto (TS 33.102, 33.501)
+# Milenage (shared implementation in corelib/milenage.py)
 # ============================================================================
-class MilenageCrypto:
-    """Milenage algorithm set (f1, f1*, f2, f3, f4, f5, f5*) per TS 33.102.
-    
-    Uses AES-128 with operator key OPc. For 5G: TUAK or Milenage with K (TS 33.501).
-    """
-    
-    # Constants per TS 33.102
-    R1 = bytes.fromhex("00000000000000000000000000000000")
-    R2 = bytes.fromhex("00000000000000000000000000000001")
-    R3 = bytes.fromhex("00000000000000000000000000000002")
-    R4 = bytes.fromhex("00000000000000000000000000000004")
-    R5 = bytes.fromhex("00000000000000000000000000000008")
-    C1 = bytes.fromhex("00000000000000000000000000000000")
-    C2 = bytes.fromhex("00000000000000000000000000000001")
-    C3 = bytes.fromhex("00000000000000000000000000000002")
-    C4 = bytes.fromhex("00000000000000000000000000000004")
-    C5 = bytes.fromhex("00000000000000000000000000000008")
-    
-    def __init__(self, opc: bytes):
-        """Initialize with OPc (16 bytes)."""
-        self.opc = opc
-        self.cipher = AES.new(opc, AES.MODE_ECB)
-    
-    def _rotl(self, x: bytes, r: int) -> bytes:
-        """Rotate left by r bits."""
-        val = int.from_bytes(x, 'big')
-        val = ((val << r) | (val >> (128 - r))) & ((1 << 128) - 1)
-        return val.to_bytes(16, 'big')
-    
-    def _xor(self, a: bytes, b: bytes) -> bytes:
-        return bytes(x ^ y for x, y in zip(a, b))
-    
-    def f1(self, k: bytes, rand: bytes, sqn: bytes, amf: bytes) -> bytes:
-        """MAC-A (64 bits) for authentication."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R1)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C1)
-        temp = self._xor(temp, sqn)
-        temp = self._xor(temp, amf.ljust(16, b'\x00'))
-        mac_a = self.cipher.encrypt(temp)[:8]
-        return mac_a
-    
-    def f1_star(self, k: bytes, rand: bytes, sqn: bytes, amf: bytes) -> bytes:
-        """MAC-S (64 bits) for resynchronization."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R1)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C1)
-        temp = self._xor(temp, sqn)
-        temp = self._xor(temp, amf.ljust(16, b'\x00'))
-        mac_s = self.cipher.encrypt(temp)[:8]
-        return mac_s
-    
-    def f2(self, k: bytes, rand: bytes) -> bytes:
-        """RES (64 bits) / XRES (256 bits for 5G)."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R2)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C2)
-        res = self.cipher.encrypt(temp)[:8]
-        return res
-    
-    def f3(self, k: bytes, rand: bytes) -> bytes:
-        """CK (128 bits) - Cipher Key."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R3)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C3)
-        ck = self.cipher.encrypt(temp)
-        return ck
-    
-    def f4(self, k: bytes, rand: bytes) -> bytes:
-        """IK (128 bits) - Integrity Key."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R4)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C4)
-        ik = self.cipher.encrypt(temp)
-        return ik
-    
-    def f5(self, k: bytes, rand: bytes) -> bytes:
-        """AK (48 bits) - Anonymity Key."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R5)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C5)
-        ak = self.cipher.encrypt(temp)[:6]
-        return ak
-    
-    def f5_star(self, k: bytes, rand: bytes) -> bytes:
-        """AK* (48 bits) for 5G."""
-        return self.f5(k, rand)
-    
-    def derive_opc(self, op: bytes, k: bytes) -> bytes:
-        """Derive OPc from OP and K: OPc = AES_K(OP)."""
-        cipher_k = AES.new(k, AES.MODE_ECB)
-        return cipher_k.encrypt(op)
-    
-    def derive_5g_keys(self, k: bytes, sqn: int, amf: bytes, rand: bytes = None) -> Dict[str, bytes]:
-        """Derive 5G key hierarchy per TS 33.501 Annex A.
-        
-        K_SEAF = KDF(K, "5G:SEAF", SQN || AMF)
-        K_AUSF = KDF(K_SEAF, "5G:AUSF", ...)
-        K_AMF  = KDF(K_SEAF, "5G:AMF", ...)
-        """
-        if rand is None:
-            rand = secrets.token_bytes(16)
-        
-        sqn_bytes = sqn.to_bytes(6, 'big')
-        
-        # K_AUSF = f5*(K, RAND) || CK || IK (simplified)
-        ak_star = self.f5_star(k, rand)
-        ck = self.f3(k, rand)
-        ik = self.f4(k, rand)
-        k_ausf = ak_star + ck + ik  # 6+16+16 = 38 bytes -> truncate to 32
-        
-        # K_SEAF = KDF(K_AUSF, "5G:SEAF", serving network name)
-        # Simplified: use HMAC-SHA256
-        k_seaf = HMAC.new(k_ausf[:32], b"5G:SEAF" + sqn_bytes + amf, SHA256).digest()
-        
-        # K_AMF = KDF(K_SEAF, "5G:AMF", AMF)
-        k_amf = HMAC.new(k_seaf, b"5G:AMF" + amf, SHA256).digest()
-        
-        return {
-            "k_ausf": k_ausf[:32],
-            "k_seaf": k_seaf,
-            "k_amf": k_amf,
-            "ck": ck,
-            "ik": ik,
-            "ak_star": ak_star,
-        }
-    
-    def generate_auth_vector_5g(self, k: bytes, sqn: int, amf: bytes) -> Dict[str, bytes]:
-        """Generate 5G authentication vector (RAND, AUTN, XRES*, K_AUSF, K_SEAF, K_AMF)."""
-        rand = secrets.token_bytes(16)
-        sqn_bytes = sqn.to_bytes(6, 'big')
-        
-        # XRES* = f2(K, RAND) extended to 256 bits for 5G
-        res = self.f2(k, rand)
-        xres_star = res + SHA256.new(rand + k).digest()[:24]  # 8+24=32 bytes
-        
-        # AUTN = SQN ⊕ AK* || AMF || MAC
-        ak_star = self.f5_star(k, rand)
-        sqn_xor_ak = self._xor(sqn_bytes, ak_star)
-        mac_a = self.f1(k, rand, sqn_bytes, amf)
-        autn = sqn_xor_ak + amf.ljust(2, b'\x00')[:2] + mac_a  # 6+2+8=16 bytes
-        
-        keys = self.derive_5g_keys(k, sqn, amf, rand)
-        
-        return {
-            "rand": rand,
-            "autn": autn,
-            "xres_star": xres_star,
-            "res": res,
-            "ck": keys["ck"],
-            "ik": keys["ik"],
-            "k_ausf": keys["k_ausf"],
-            "k_seaf": keys["k_seaf"],
-            "k_amf": keys["k_amf"],
-        }
-    
-    def generate_auth_vector_4g(self, ki: bytes, sqn: int, amf: bytes) -> Dict[str, bytes]:
-        """Generate 4G EPS authentication vector per TS 33.401."""
-        rand = secrets.token_bytes(16)
-        sqn_bytes = sqn.to_bytes(6, 'big')
-        
-        res = self.f2(ki, rand)
-        xres = res  # 64-bit for 4G
-        ck = self.f3(ki, rand)
-        ik = self.f4(ki, rand)
-        ak = self.f5(ki, rand)
-        
-        sqn_xor_ak = self._xor(sqn_bytes, ak)
-        mac_a = self.f1(ki, rand, sqn_bytes, amf)
-        autn = sqn_xor_ak + amf.ljust(2, b'\x00')[:2] + mac_a
-        
-        # K_ASME = KDF(CK, IK, SN_ID, ...)
-        k_asme = HMAC.new(ck + ik, b"EPS:KASME" + sqn_bytes, SHA256).digest()
-        
-        return {
-            "rand": rand,
-            "autn": autn,
-            "xres": xres,
-            "res": res,
-            "ck": ck,
-            "ik": ik,
-            "k_asme": k_asme,
-        }
-    
-    def generate_auth_vector_2g3g(self, ki: bytes, rand: bytes = None) -> Dict[str, bytes]:
-        """Generate 2G/3G authentication vector (COMP128 / Milenage)."""
-        if rand is None:
-            rand = secrets.token_bytes(16)
-        
-        sres = self.f2(ki, rand)[:4]  # 32-bit SRES
-        kc = self.f3(ki, rand)[:8]    # 64-bit Kc
-        
-        return {
-            "rand": rand,
-            "sres": sres,
-            "kc": kc,
-        }
-
-
-# Global crypto instance (will be initialized per-subscriber)
-crypto = None
-
-
-def get_crypto(opc_hex: str) -> MilenageCrypto:
-    """Get MilenageCrypto instance for given OPc."""
-    if not CRYPTO_AVAILABLE:
-        raise RuntimeError("pycryptodome not available - install for production crypto")
-    return MilenageCrypto(bytes.fromhex(opc_hex))
+def get_crypto(opc_hex: str) -> Milenage:
+    return Milenage(bytes.fromhex(opc_hex))
 
 
 def derive_opc(op: str, k: str) -> str:
-    """Derive OPc from OP and K using AES-128."""
-    if not CRYPTO_AVAILABLE:
-        raise RuntimeError("CRYPTO_UNAVAILABLE: cannot derive OPc without pycryptodome")
-    op_bytes = bytes.fromhex(op)
-    k_bytes = bytes.fromhex(k)
-    cipher = AES.new(k_bytes, AES.MODE_ECB)
-    opc = cipher.encrypt(op_bytes)
-    return opc.hex().upper()
+    return _derive_opc(bytes.fromhex(op), bytes.fromhex(k)).hex().upper()
+
+
+def serving_plmn() -> bytes:
+    return plmn_id(os.getenv("PLMN_MCC", "641"), os.getenv("PLMN_MNC", "020"))
+
+
+def serving_network_name() -> str:
+    mcc = os.getenv("PLMN_MCC", "641")
+    mnc = os.getenv("PLMN_MNC", "020")
+    return os.getenv(
+        "SERVING_NETWORK_NAME", f"5G:mnc{mnc.zfill(3)}.mcc{mcc}.3gppnetwork.org"
+    )
 
 
 # ============================================================================
@@ -906,18 +701,9 @@ def create_subscriber(sub: SubscriberCreate):
         elif sub.op and sub.ki and not opc:
             opc = derive_opc(sub.op.upper(), sub.ki.upper())
         
-        # Auto-derive 5G keys if K provided
+        # K_ASME/K_SEAF/K_AUSF are per-authentication outputs (TS 33.501 A.6),
+        # not subscriber credentials, so provisioning stores only K/OPc and SQN.
         keys_5g = {"k_asme": sub.k_asme, "k_seaf": sub.k_seaf, "k_ausf": sub.k_ausf}
-        if sub.k and not any(keys_5g.values()):
-            if CRYPTO_AVAILABLE and opc:
-                crypto = get_crypto(opc)
-                derived = crypto.derive_5g_keys(bytes.fromhex(sub.k), sub.sqn, bytes.fromhex(sub.amf))
-                keys_5g = {k: v.hex().upper() for k, v in derived.items()}
-            else:
-                raise HTTPException(
-                    status_code=500,
-                    detail="CRYPTO_UNAVAILABLE: pycryptodome required for 5G key derivation — fail closed"
-                )
         
         cur.execute(
             """INSERT INTO tbl_subscriber
@@ -1086,64 +872,47 @@ def get_auth_vector(imsi: str, rand: Optional[str] = None, algorithm: str = "mil
         amf_bytes = bytes.fromhex(row["amf"])
         sqn = row["sqn"]
         
-        # 5G AKA (if K present)
+        # 5G AKA (if K present): UDM returns the HE AV only — RAND, AUTN,
+        # XRES* and KAUSF. KSEAF/KAMF belong to the AUSF (TS 33.501 §6.1.3.2).
         if row.get("k") and row.get("opc"):
-            if CRYPTO_AVAILABLE:
-                crypto = get_crypto(row["opc"])
-                k_bytes = bytes.fromhex(row["k"])
-                av = crypto.generate_auth_vector_5g(k_bytes, sqn, amf_bytes)
-                rand_bytes = av["rand"]
-                rand_hex = rand_bytes.hex().upper()
-                autn = av["autn"].hex().upper()
-                xres_star = av["xres_star"].hex().upper()
-                res = av["res"].hex().upper()
-                xres = av["xres_star"].hex().upper()  # Use XRES* for both
-                ck = av["ck"].hex().upper()
-                ik = av["ik"].hex().upper()
-                k_ausf = av["k_ausf"].hex().upper()
-                k_seaf = av["k_seaf"].hex().upper()
-                k_amf = av["k_amf"].hex().upper()
-                # K_ASME = K_SEAF for 5G (or derived)
-                k_asme = av["k_seaf"].hex().upper()
-            else:
-                raise HTTPException(
-                    status_code=500,
-                    detail="CRYPTO_UNAVAILABLE: pycryptodome required for 5G AKA — fail closed"
-                )
-        
+            crypto = get_crypto(row["opc"])
+            av = crypto.generate_5g_he_av(
+                bytes.fromhex(row["k"]), sqn, amf_bytes,
+                serving_network_name(), rand=rand_bytes,
+            )
+            autn = av["autn"].hex().upper()
+            xres_star = av["xres_star"].hex().upper()
+            res = av["res"].hex().upper()
+            xres = xres_star
+            ck = av["ck"].hex().upper()
+            ik = av["ik"].hex().upper()
+            k_ausf = av["k_ausf"].hex().upper()
+
         # 4G AKA (if Ki present, no 5G)
         elif row.get("ki") and row.get("opc"):
-            if CRYPTO_AVAILABLE:
-                crypto = get_crypto(row["opc"])
-                ki_bytes = bytes.fromhex(row["ki"])
-                av = crypto.generate_auth_vector_4g(ki_bytes, sqn, amf_bytes)
-                rand_bytes = av["rand"]
-                rand_hex = rand_bytes.hex().upper()
-                autn = av["autn"].hex().upper()
-                xres = av["xres"].hex().upper()
-                res = av["res"].hex().upper()
-                ck = av["ck"].hex().upper()
-                ik = av["ik"].hex().upper()
-                k_asme = av["k_asme"].hex().upper()
-            else:
-                raise HTTPException(
-                    status_code=500,
-                    detail="CRYPTO_UNAVAILABLE: pycryptodome required for 4G AKA — fail closed"
-                )
-        
+            crypto = get_crypto(row["opc"])
+            av = crypto.generate_eps_av(
+                bytes.fromhex(row["ki"]), sqn, amf_bytes,
+                sn_id=serving_plmn(), rand=rand_bytes,
+            )
+            autn = av["autn"].hex().upper()
+            xres = av["xres"].hex().upper()
+            res = av["res"].hex().upper()
+            ck = av["ck"].hex().upper()
+            ik = av["ik"].hex().upper()
+            k_asme = av["k_asme"].hex().upper()
+
         # 2G/3G (if Ki present)
         if row.get("ki"):
-            if CRYPTO_AVAILABLE and row.get("opc"):
-                crypto = get_crypto(row["opc"])
-                ki_bytes = bytes.fromhex(row["ki"])
-                av = crypto.generate_auth_vector_2g3g(ki_bytes, rand_bytes)
-                sres = av["sres"].hex().upper()
-                kc = av["kc"].hex().upper()
-            else:
+            if not row.get("opc"):
                 raise HTTPException(
-                    status_code=500,
-                    detail="CRYPTO_UNAVAILABLE: pycryptodome required for 2G/3G — fail closed"
+                    status_code=400,
+                    detail="AUTH_CREDENTIALS_MISSING: opc not provisioned",
                 )
+            crypto = get_crypto(row["opc"])
+            av = crypto.generate_2g3g_av(bytes.fromhex(row["ki"]), rand=rand_bytes)
+            sres = av["sres"].hex().upper()
+            kc = av["kc"].hex().upper()
         
         # Update SQN
         new_sqn = sqn + 1
@@ -1351,27 +1120,42 @@ def generate_auth_data(supi_or_suci: str, req: GenerateAuthDataRequest):
         
         if not row.get("k") or not row.get("opc"):
             raise HTTPException(status_code=400, detail="5G credentials not provisioned")
-        
-        # Generate authentication vector
-        if CRYPTO_AVAILABLE:
-            crypto = get_crypto(row["opc"])
-            k_bytes = bytes.fromhex(row["k"])
-            av = crypto.generate_auth_vector_5g(k_bytes, row["sqn"], bytes.fromhex(row["amf"]))
-            
-            auth_vector = AuthenticationVector5G(
-                rand=av["rand"].hex().upper(),
-                xres_star=av["xres_star"].hex().upper(),
-                autn=av["autn"].hex().upper(),
-                kausf=av["k_ausf"].hex().upper()
-            )
-        else:
-            raise HTTPException(
-                status_code=500,
-                detail="CRYPTO_UNAVAILABLE: pycryptodome required for 5G AKA — fail closed"
-            )
-        
-        # Update SQN
-        new_sqn = row["sqn"] + 1
+
+        crypto = get_crypto(row["opc"])
+        k_bytes = bytes.fromhex(row["k"])
+        sqn = row["sqn"]
+
+        # AUTS resynchronisation (TS 33.102 §6.3.3, TS 29.503 §5.2.2.1).
+        if req.resynchronization_info:
+            try:
+                rand_bytes = bytes.fromhex(req.resynchronization_info["rand"])
+                auts_bytes = bytes.fromhex(req.resynchronization_info["auts"])
+            except (KeyError, TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400,
+                    detail="RESYNC_INFO_MALFORMED: rand and auts are required hex strings",
+                )
+            try:
+                sqn = crypto.auts_sqn(k_bytes, rand_bytes, auts_bytes)
+            except AutsVerificationError:
+                raise HTTPException(
+                    status_code=403,
+                    detail="AUTS_VERIFICATION_FAILED: MAC-S mismatch",
+                )
+
+        av = crypto.generate_5g_he_av(
+            k_bytes, sqn, bytes.fromhex(row["amf"]),
+            req.serving_network_name,
+        )
+        auth_vector = AuthenticationVector5G(
+            rand=av["rand"].hex().upper(),
+            xres_star=av["xres_star"].hex().upper(),
+            autn=av["autn"].hex().upper(),
+            kausf=av["k_ausf"].hex().upper()
+        )
+
+        # SQN advances past the (possibly resynchronised) value just used.
+        new_sqn = sqn + 1
         cur.execute("UPDATE tbl_subscriber SET sqn=%s WHERE imsi=%s", (new_sqn, imsi))
         conn.commit()
         
@@ -1418,64 +1202,47 @@ def generate_hss_av(supi: str, hss_auth_type: str, req: HssAvRequest):
         if not row.get("ki") or not row.get("opc"):
             raise HTTPException(status_code=400, detail="4G/3G/2G credentials not provisioned")
         
+        if hss_auth_type == "eap-aka-prime":
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "EAP_AKA_PRIME_NOT_IMPLEMENTED: CK'/IK' derivation (TS 33.402) "
+                    "is not built; refusing to return placeholder vectors"
+                ),
+            )
+
+        crypto = get_crypto(row["opc"])
+        ki_bytes = bytes.fromhex(row["ki"])
+        amf_bytes = bytes.fromhex(row["amf"])
+
         auth_vectors = []
         for i in range(req.num_vectors):
-            rand = secrets.token_bytes(16)
-            rand_hex = rand.hex().upper()
-            
-            if CRYPTO_AVAILABLE:
-                crypto = get_crypto(row["opc"])
-                ki_bytes = bytes.fromhex(row["ki"])
-                sqn = row["sqn"]
-                amf_bytes = bytes.fromhex(row["amf"])
-                
-                if hss_auth_type in ["eps-aka", "eap-aka"]:
-                    av = crypto.generate_auth_vector_4g(ki_bytes, sqn, amf_bytes)
-                    auth_vectors.append({
-                        "av_type": "EPS_AKA",
-                        "rand": rand_hex,
-                        "xres": av["xres"].hex().upper(),
-                        "autn": av["autn"].hex().upper(),
-                        "kasme": av["k_asme"].hex().upper(),
-                        "ck": av["ck"].hex().upper(),
-                        "ik": av["ik"].hex().upper()
-                    })
-                elif hss_auth_type == "ims-aka":
-                    av = crypto.generate_auth_vector_4g(ki_bytes, sqn, amf_bytes)
-                    auth_vectors.append({
-                        "av_type": "IMS_AKA",
-                        "rand": rand_hex,
-                        "xres": av["xres"].hex().upper(),
-                        "autn": av["autn"].hex().upper(),
-                        "ck": av["ck"].hex().upper(),
-                        "ik": av["ik"].hex().upper()
-                    })
-                elif hss_auth_type == "gba-aka":
-                    av = crypto.generate_auth_vector_4g(ki_bytes, sqn, amf_bytes)
-                    auth_vectors.append({
-                        "av_type": "GBA_AKA",
-                        "rand": rand_hex,
-                        "xres": av["xres"].hex().upper(),
-                        "autn": av["autn"].hex().upper(),
-                        "ck": av["ck"].hex().upper(),
-                        "ik": av["ik"].hex().upper()
-                    })
-                else:
-                    raise HTTPException(
-                        status_code=501,
-                        detail=(
-                            "EAP_AKA_PRIME_NOT_IMPLEMENTED: CK'/IK' derivation (TS 33.402) "
-                            "is not built; refusing to return placeholder vectors"
-                        ),
-                    )
-            else:
-                raise HTTPException(
-                    status_code=500,
-                    detail="CRYPTO_UNAVAILABLE: pycryptodome required for EPS/IMS vectors — fail closed",
-                )
+            # Each vector must use its own SQN and its own RAND, and the RAND
+            # returned in the response must be the one inside AUTN/XRES.
+            av = crypto.generate_eps_av(
+                ki_bytes, row["sqn"] + i, amf_bytes,
+                sn_id=serving_plmn(), rand=secrets.token_bytes(16),
+            )
+            vector = {
+                "rand": av["rand"].hex().upper(),
+                "xres": av["xres"].hex().upper(),
+                "autn": av["autn"].hex().upper(),
+                "ck": av["ck"].hex().upper(),
+                "ik": av["ik"].hex().upper(),
+            }
+            if hss_auth_type in ("eps-aka", "eap-aka"):
+                vector["av_type"] = "EPS_AKA"
+                vector["kasme"] = av["k_asme"].hex().upper()
+            elif hss_auth_type == "ims-aka":
+                vector["av_type"] = "IMS_AKA"
+            else:  # gba-aka
+                vector["av_type"] = "GBA_AKA"
+            auth_vectors.append(vector)
 
-            # Increment SQN per vector
-            cur.execute("UPDATE tbl_subscriber SET sqn=sqn+1 WHERE imsi=%s", (supi,))
+        cur.execute(
+            "UPDATE tbl_subscriber SET sqn=%s WHERE imsi=%s",
+            (row["sqn"] + req.num_vectors, supi),
+        )
         
         conn.commit()
         r = get_redis()
@@ -1539,9 +1306,9 @@ def suci_is_suci(val: str) -> bool:
 
 
 def resolve_identity(supi_or_suci: str) -> str:
-    """Pass a SUPI through; de-conceal a SUCI with a specific failure cause."""
+    """Return the IMSI for a SUPI or SUCI (TS 29.503 uses imsi-<digits>)."""
     if not suci_is_suci(supi_or_suci):
-        return supi_or_suci
+        return supi_or_suci[5:] if supi_or_suci.startswith("imsi-") else supi_or_suci
     try:
         return suci_lib.deconceal(supi_or_suci)
     except suci_lib.SuciError as exc:
@@ -3156,20 +2923,13 @@ async def batch_upload(
                     elif op and ki:
                         opc = derive_opc(op.upper(), ki.upper())
                 
-                # Auto-derive 5G keys
-                keys_5g = {"k_asme": None, "k_seaf": None, "k_ausf": None}
-                if auto_derive and k and not any([rec.get("k_asme"), rec.get("k_seaf"), rec.get("k_ausf")]):
-                    sqn = int(rec.get("sqn", 0))
-                    amf = rec.get("amf", "8000").upper()
-                    if CRYPTO_AVAILABLE and opc:
-                        crypto = get_crypto(opc)
-                        derived = crypto.derive_5g_keys(bytes.fromhex(k.upper()), sqn, bytes.fromhex(amf))
-                        keys_5g = {k: v.hex().upper() for k, v in derived.items()}
-                    else:
-                        raise HTTPException(
-                            status_code=500,
-                            detail="CRYPTO_UNAVAILABLE: pycryptodome required for 5G key derivation — fail closed"
-                        )
+                # Per-authentication keys are derived at authentication time,
+                # never stored against the subscriber record.
+                keys_5g = {
+                    "k_asme": rec.get("k_asme"),
+                    "k_seaf": rec.get("k_seaf"),
+                    "k_ausf": rec.get("k_ausf"),
+                }
                 
                 cur.execute(
                     """INSERT INTO tbl_subscriber
@@ -3324,38 +3084,23 @@ def allocate_from_range(req: IMSIAllocateRequest):
         for i in range(count):
             imsi = f"{next_num + i:015d}"
             
-            # Derive keys
-            opc = None
-            keys_5g = {"k_asme": None, "k_seaf": None, "k_ausf": None}
             k = req.k or range_row.get("default_k")
             ki = req.ki or range_row.get("default_ki")
             op = req.op or range_row.get("default_op")
             opc = req.opc or range_row.get("default_opc")
-            
+
             if not opc and op and k:
                 opc = derive_opc(op.upper(), k.upper())
             elif not opc and op and ki:
                 opc = derive_opc(op.upper(), ki.upper())
-            
-            if k and not any(keys_5g.values()):
-                if CRYPTO_AVAILABLE and opc:
-                    crypto = get_crypto(opc)
-                    derived = crypto.derive_5g_keys(bytes.fromhex(k.upper()), 0, bytes.fromhex("8000"))
-                    keys_5g = {k: v.hex().upper() for k, v in derived.items()}
-                else:
-                    raise HTTPException(
-                        status_code=500,
-                        detail="CRYPTO_UNAVAILABLE: pycryptodome required for 5G key derivation — fail closed"
-                    )
-            
+
             cur.execute(
                 """INSERT INTO tbl_subscriber
                    (imsi, k, ki, op, opc, sqn, amf,
                     k_asme, k_seaf, k_ausf,
                     network_access_mode, subscriber_status, batch_id)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (imsi, k, ki, op, opc, 0, "8000",
-                 keys_5g["k_asme"], keys_5g["k_seaf"], keys_5g["k_ausf"],
+                (imsi, k, ki, op, opc, 0, "8000", None, None, None,
                  req.network_access_mode, req.subscriber_status, req.range_name)
             )
             allocated.append(imsi)

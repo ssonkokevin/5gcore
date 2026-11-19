@@ -110,6 +110,18 @@ class TestStaticContracts(unittest.TestCase):
             self.assertNotIn(token, source)
         self.assertIn("CRYPTO_UNAVAILABLE", source)
 
+    def test_udm_and_hss_share_corelib_milenage(self):
+        for name in ("udm/src/udm_server.py", "hss/src/nhss_server.py"):
+            source = (ROOT / name).read_text(encoding="utf-8")
+            self.assertIn("from corelib.milenage import", source, name)
+            self.assertNotIn("class MilenageCrypto", source, name)
+            self.assertNotIn("HMAC.new", source, f"{name} still fabricates keys")
+            self.assertNotIn("hashlib.sha256((op", source, f"{name} still has an OPc fallback")
+            self.assertNotIn("hashlib.sha256((row[", source, f"{name} still hashes a vector")
+        for name in ("udm", "hss"):
+            dockerfile = (ROOT / "docker" / name / "Dockerfile").read_text(encoding="utf-8")
+            self.assertIn("COPY ./corelib/ /app/corelib/", dockerfile, name)
+
     def test_location_chain_registers_with_the_custom_nrf(self):
         services = load_compose()["services"]
         for name in ("custom-amf", "custom-lmf"):

@@ -443,6 +443,8 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-change-me}
       - LOG_LEVEL=${LOG_LEVEL:-info}
       - OPERATOR_KEY=${OPERATOR_KEY:-00000000000000000000000000000000}
+      - PLMN_MCC=${PLMN_MCC:-641}
+      - PLMN_MNC=${PLMN_MNC:-020}
       - NRF_ADDR=custom-nrf
       - NRF_PORT=8000
       # SUCI de-concealment keys stay in this container; never log them.
