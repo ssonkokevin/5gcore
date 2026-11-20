@@ -26,6 +26,7 @@ htmlcov/
 
 # Node / Vue
 node_modules/
+oam-frontend/dist/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -33,7 +34,6 @@ yarn-error.log*
 .cache/
 
 # Docker
-.dockerignore
 Dockerfile.local
 *.dockerfile.swp
 

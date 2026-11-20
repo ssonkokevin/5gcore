@@ -1,0 +1,21 @@
+# NRF — Network Repository Function (TS 29.510)
+# Runtime overrides come from environment variables; this file documents the
+# defaults used when the container starts with no .env.
+
+nrf:
+  host: "0.0.0.0"
+  port: 8000
+  # Heartbeat period advertised to NFs, seconds.
+  heartbeat_timer: 30
+  # An NF is dropped after heartbeat_timer * expiry_factor seconds without a
+  # heartbeat (Redis TTL). Keep >= 3 so one lost PATCH does not evict an NF.
+  expiry_factor: 4
+
+storage:
+  redis_host: "redis"
+  redis_port: 6379
+  key_prefix: "nrf:nf:"
+  subscription_prefix: "nrf:sub:"
+
+logging:
+  level: "${LOG_LEVEL:-info}"

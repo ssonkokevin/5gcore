@@ -1,0 +1,95 @@
+{
+  "predefinedRules": [
+    {
+      "pccRuleId": "predef-internet",
+      "precedence": 255,
+      "flowInfos": [
+        {
+          "flowDescription": "permit out ip from any to any",
+          "flowDirection": "BOTH",
+          "flowId": 1
+        }
+      ],
+      "appId": "internet",
+      "refQosData": ["default-qos"],
+      "refChgData": ["default-charging"],
+      "refTcData": ["default-tc"],
+      "refUmData": ["default-um"],
+      "pccRuleStatus": "ACTIVE"
+    },
+    {
+      "pccRuleId": "predef-ims",
+      "precedence": 10,
+      "flowInfos": [
+        {
+          "flowDescription": "permit out udp from any to any 5060",
+          "flowDirection": "BOTH",
+          "flowId": 1
+        }
+      ],
+      "appId": "ims",
+      "refQosData": ["ims-qos"],
+      "refChgData": ["ims-charging"],
+      "refTcData": ["ims-tc"],
+      "refUmData": ["ims-um"],
+      "pccRuleStatus": "ACTIVE"
+    },
+    {
+      "pccRuleId": "predef-video-day",
+      "precedence": 50,
+      "flowInfos": [],
+      "appId": "video",
+      "refQosData": ["video-qos"],
+      "refChgData": ["video-charging"],
+      "refTcData": ["video-tc"],
+      "refUmData": ["video-um"],
+      "refCondData": ["time-day"],
+      "pccRuleStatus": "ACTIVE"
+    },
+    {
+      "pccRuleId": "predef-video-night",
+      "precedence": 50,
+      "flowInfos": [],
+      "appId": "video",
+      "refQosData": ["video-qos"],
+      "refChgData": ["video-charging"],
+      "refTcData": ["video-tc"],
+      "refUmData": ["night-bundle-um"],
+      "refCondData": ["time-night"],
+      "pccRuleStatus": "ACTIVE"
+    },
+    {
+      "pccRuleId": "predef-social",
+      "precedence": 100,
+      "flowInfos": [],
+      "appId": "social",
+      "refQosData": ["social-qos"],
+      "refChgData": ["social-charging"],
+      "refTcData": ["social-tc"],
+      "refUmData": ["social-um"],
+      "pccRuleStatus": "ACTIVE"
+    },
+    {
+      "pccRuleId": "predef-gaming",
+      "precedence": 30,
+      "flowInfos": [],
+      "appId": "gaming",
+      "refQosData": ["gaming-qos"],
+      "refChgData": ["gaming-charging"],
+      "refTcData": ["gaming-tc"],
+      "refUmData": ["gaming-um"],
+      "pccRuleStatus": "ACTIVE"
+    },
+    {
+      "pccRuleId": "predef-blocked",
+      "precedence": 1,
+      "flowInfos": [],
+      "appId": "blocked",
+      "refQosData": ["default-qos"],
+      "refChgData": ["default-charging"],
+      "refTcData": ["blocked-app-tc"],
+      "refUmData": ["default-um"],
+      "pccRuleStatus": "ACTIVE"
+    }
+  ]
+}

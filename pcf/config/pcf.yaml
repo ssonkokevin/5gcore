@@ -1,26 +1,54 @@
 pcf:
-  host: 0.0.0.0
+  host: "0.0.0.0"
   port: 7777
-  realm: core.local
-  origin_host: pcf.core.local
-  nrf_addr: http://nrf:7777
-  sbi_tls: false
-  plmn:
-    mcc: "001"
-    mnc: "01"
-  snssai:
-    - sst: 1
-      sd: "000001"
-  dnn: [internet]
-pcrf:
-  gx_port: 3868
-  gy_port: 3869
-  realm: core.local
-  origin_host: pcf.core.local
-  vendor_id: 10415
-  product_name: SRG-PCRF
-  db_uri: mysql://net5gc:net5gc@db:3306/PCRFDB
-pcc:
-  rules_file: /app/config/pcc_rules.json
-  default_qci: 9
-  default_arp: 8
+  tls:
+    enabled: false
+    cert_file: "/app/certs/pcf.crt"
+    key_file: "/app/certs/pcf.key"
+  nrf:
+    endpoint: "http://nrf:8080"
+    registration_interval: 30
+  udm:
+    endpoint: "http://udm:8080"
+  chf:
+    endpoint: "http://chf:8080"
+  log_level: "INFO"
+  pcc_rules_file: "/app/config/pcc_rules.json"
+  session_rules_file: "/app/config/session_rules.json"
+  qos_profiles_file: "/app/config/qos_profiles.json"
+  charging_profiles_file: "/app/config/charging_profiles.json"
+  traffic_control_profiles_file: "/app/config/traffic_control_profiles.json"
+  usage_monitoring_profiles_file: "/app/config/usage_monitoring_profiles.json"
+  condition_profiles_file: "/app/config/condition_profiles.json"
+  predefined_rules_file: "/app/config/predefined_rules.json"
+  default_session_ambr:
+    uplink: 1000000000
+    downlink: 1000000000
+  default_5qi: 9
+  default_arp:
+    priority_level: 8
+    pre_empt_cap: true
+    pre_empt_vuln: true
+  supported_features: "ffff"
+  policy_control_request_triggers:
+    - "PLMN_CH"
+    - "AC_TY_CH"
+    - "RAT_TY_CH"
+    - "LOC_CH"
+    - "PRA_CH"
+    - "OUT_OF_CREDIT"
+    - "REALLO_CREDIT"
+    - "UE_IP_CH"
+    - "US_RE"
+    - "APP_STA"
+    - "APP_STO"
+    - "AN_INFO"
+    - "CREDIT_MGMT_SESS_FAIL"
+    - "UE_REACH"
+    - "SE_AMBR_CH"
+    - "DEF_QOS_CH"
+    - "NO_CREDIT"
+    - "RES_RELEASE"
+    - "SUCC_RES_ALLO"
+    - "QOS_NOTIF"
+    - "ACCESS_TYPE_CHANGE"

@@ -1,0 +1,57 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  static-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: pip install pyyaml fastapi httpx cryptography pycryptodome pydantic python-multipart uvicorn
+
+      - name: Stack contract checks
+        run: python scripts/check_stack.py
+
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Shell syntax
+        run: |
+          for script in scripts/*.sh docker/*/entrypoint.sh; do
+            [ -f "$script" ] || continue
+            bash -n "$script"
+            echo "syntax ok: $script"
+          done
+
+      - name: Compose file parses
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+          echo "compose config ok"
+
+      - name: No committed keys or raw secrets
+        run: |
+          set +e
+          hits=$(git grep -nIE 'BEGIN [A-Z ]*PRIVATE KEY|[^0-9a-fA-F][0-9a-fA-F]{64}([^0-9a-fA-F]|$)' \
+            -- . \
+            ':(exclude).env.example' \
+            ':(exclude)docs' \
+            ':(exclude)tests' \
+            ':(exclude)*.png' ':(exclude)*.jpg' ':(exclude)*.pdf')
+          status=$?
+          if [ $status -eq 0 ]; then
+            echo "$hits"
+            echo "::error::private key or 64-hex literal committed"
+            exit 1
+          fi
+          echo "no private keys or 64-hex literals found"
+          exit 0

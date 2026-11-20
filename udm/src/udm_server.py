@@ -38,8 +38,10 @@ Endpoints:
 import csv
 import io
 import json
+import logging
 import os
 import secrets
+import sys
 import uuid
 from datetime import datetime
 from typing import Optional, List, Dict, Any
@@ -49,13 +51,28 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Query
 from pydantic import BaseModel, Field, field_validator
 import redis
 
-# Crypto imports for Milenage/AES (TS 33.102, 33.501)
-try:
-    from Crypto.Cipher import AES
-    from Crypto.Hash import SHA256, HMAC
-    CRYPTO_AVAILABLE = True
-except ImportError:
-    CRYPTO_AVAILABLE = False
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_SRC_DIR))
+sys.path.insert(0, _SRC_DIR)
+import suci as suci_lib  # noqa: E402  (TS 33.501 Annex C de-concealment)
+from corelib.http import TransportError  # noqa: E402
+from corelib.milenage import (  # noqa: E402
+    CRYPTO_BACKEND,
+    AutsVerificationError,
+    Milenage,
+    derive_opc as _derive_opc,
+    plmn_id,
+)
+from corelib.udr_client import UdrClient, UdrError  # noqa: E402
+
+logger = logging.getLogger("udm")
+
+CRYPTO_AVAILABLE = CRYPTO_BACKEND is not None
+if not CRYPTO_AVAILABLE:
+    raise SystemExit(
+        "CRYPTO_UNAVAILABLE: no AES backend; install pycryptodome (containers) "
+        "or cryptography (host). Refusing to start without Milenage."
+    )
 
 app = FastAPI(
     title="UDM Tri-Mode (5G/4G/3G/2G) - Rel-15 to Rel-20",
@@ -85,255 +102,33 @@ OPERATOR_KEY = bytes.fromhex(os.getenv("OPERATOR_KEY", "00" * 16))  # OP/OPc def
 
 
 # ============================================================================
-# Milenage / AES Crypto (TS 33.102, 33.501)
+# Milenage (shared implementation in corelib/milenage.py)
 # ============================================================================
-class MilenageCrypto:
-    """Milenage algorithm set (f1, f1*, f2, f3, f4, f5, f5*) per TS 33.102.
-    
-    Uses AES-128 with operator key OPc. For 5G: TUAK or Milenage with K (TS 33.501).
-    """
-    
-    # Constants per TS 33.102
-    R1 = bytes.fromhex("00000000000000000000000000000000")
-    R2 = bytes.fromhex("00000000000000000000000000000001")
-    R3 = bytes.fromhex("00000000000000000000000000000002")
-    R4 = bytes.fromhex("00000000000000000000000000000004")
-    R5 = bytes.fromhex("00000000000000000000000000000008")
-    C1 = bytes.fromhex("00000000000000000000000000000000")
-    C2 = bytes.fromhex("00000000000000000000000000000001")
-    C3 = bytes.fromhex("00000000000000000000000000000002")
-    C4 = bytes.fromhex("00000000000000000000000000000004")
-    C5 = bytes.fromhex("00000000000000000000000000000008")
-    
-    def __init__(self, opc: bytes):
-        """Initialize with OPc (16 bytes)."""
-        self.opc = opc
-        self.cipher = AES.new(opc, AES.MODE_ECB)
-    
-    def _rotl(self, x: bytes, r: int) -> bytes:
-        """Rotate left by r bits."""
-        val = int.from_bytes(x, 'big')
-        val = ((val << r) | (val >> (128 - r))) & ((1 << 128) - 1)
-        return val.to_bytes(16, 'big')
-    
-    def _xor(self, a: bytes, b: bytes) -> bytes:
-        return bytes(x ^ y for x, y in zip(a, b))
-    
-    def f1(self, k: bytes, rand: bytes, sqn: bytes, amf: bytes) -> bytes:
-        """MAC-A (64 bits) for authentication."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R1)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C1)
-        temp = self._xor(temp, sqn)
-        temp = self._xor(temp, amf.ljust(16, b'\x00'))
-        mac_a = self.cipher.encrypt(temp)[:8]
-        return mac_a
-    
-    def f1_star(self, k: bytes, rand: bytes, sqn: bytes, amf: bytes) -> bytes:
-        """MAC-S (64 bits) for resynchronization."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R1)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C1)
-        temp = self._xor(temp, sqn)
-        temp = self._xor(temp, amf.ljust(16, b'\x00'))
-        mac_s = self.cipher.encrypt(temp)[:8]
-        return mac_s
-    
-    def f2(self, k: bytes, rand: bytes) -> bytes:
-        """RES (64 bits) / XRES (256 bits for 5G)."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R2)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C2)
-        res = self.cipher.encrypt(temp)[:8]
-        return res
-    
-    def f3(self, k: bytes, rand: bytes) -> bytes:
-        """CK (128 bits) - Cipher Key."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R3)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C3)
-        ck = self.cipher.encrypt(temp)
-        return ck
-    
-    def f4(self, k: bytes, rand: bytes) -> bytes:
-        """IK (128 bits) - Integrity Key."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R4)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C4)
-        ik = self.cipher.encrypt(temp)
-        return ik
-    
-    def f5(self, k: bytes, rand: bytes) -> bytes:
-        """AK (48 bits) - Anonymity Key."""
-        temp = self._xor(self._xor(rand, self.opc), self.cipher.encrypt(self._xor(k, self.opc)))
-        temp = self._xor(temp, self.R5)
-        temp = self.cipher.encrypt(temp)
-        temp = self._xor(temp, self.C5)
-        ak = self.cipher.encrypt(temp)[:6]
-        return ak
-    
-    def f5_star(self, k: bytes, rand: bytes) -> bytes:
-        """AK* (48 bits) for 5G."""
-        return self.f5(k, rand)
-    
-    def derive_opc(self, op: bytes, k: bytes) -> bytes:
-        """Derive OPc from OP and K: OPc = AES_K(OP)."""
-        cipher_k = AES.new(k, AES.MODE_ECB)
-        return cipher_k.encrypt(op)
-    
-    def derive_5g_keys(self, k: bytes, sqn: int, amf: bytes, rand: bytes = None) -> Dict[str, bytes]:
-        """Derive 5G key hierarchy per TS 33.501 Annex A.
-        
-        K_SEAF = KDF(K, "5G:SEAF", SQN || AMF)
-        K_AUSF = KDF(K_SEAF, "5G:AUSF", ...)
-        K_AMF  = KDF(K_SEAF, "5G:AMF", ...)
-        """
-        if rand is None:
-            rand = secrets.token_bytes(16)
-        
-        sqn_bytes = sqn.to_bytes(6, 'big')
-        
-        # K_AUSF = f5*(K, RAND) || CK || IK (simplified)
-        ak_star = self.f5_star(k, rand)
-        ck = self.f3(k, rand)
-        ik = self.f4(k, rand)
-        k_ausf = ak_star + ck + ik  # 6+16+16 = 38 bytes -> truncate to 32
-        
-        # K_SEAF = KDF(K_AUSF, "5G:SEAF", serving network name)
-        # Simplified: use HMAC-SHA256
-        k_seaf = HMAC.new(k_ausf[:32], b"5G:SEAF" + sqn_bytes + amf, SHA256).digest()
-        
-        # K_AMF = KDF(K_SEAF, "5G:AMF", AMF)
-        k_amf = HMAC.new(k_seaf, b"5G:AMF" + amf, SHA256).digest()
-        
-        return {
-            "k_ausf": k_ausf[:32],
-            "k_seaf": k_seaf,
-            "k_amf": k_amf,
-            "ck": ck,
-            "ik": ik,
-            "ak_star": ak_star,
-        }
-    
-    def generate_auth_vector_5g(self, k: bytes, sqn: int, amf: bytes) -> Dict[str, bytes]:
-        """Generate 5G authentication vector (RAND, AUTN, XRES*, K_AUSF, K_SEAF, K_AMF)."""
-        rand = secrets.token_bytes(16)
-        sqn_bytes = sqn.to_bytes(6, 'big')
-        
-        # XRES* = f2(K, RAND) extended to 256 bits for 5G
-        res = self.f2(k, rand)
-        xres_star = res + SHA256.new(rand + k).digest()[:24]  # 8+24=32 bytes
-        
-        # AUTN = SQN ⊕ AK* || AMF || MAC
-        ak_star = self.f5_star(k, rand)
-        sqn_xor_ak = self._xor(sqn_bytes, ak_star)
-        mac_a = self.f1(k, rand, sqn_bytes, amf)
-        autn = sqn_xor_ak + amf.ljust(2, b'\x00')[:2] + mac_a  # 6+2+8=16 bytes
-        
-        keys = self.derive_5g_keys(k, sqn, amf, rand)
-        
-        return {
-            "rand": rand,
-            "autn": autn,
-            "xres_star": xres_star,
-            "res": res,
-            "ck": keys["ck"],
-            "ik": keys["ik"],
-            "k_ausf": keys["k_ausf"],
-            "k_seaf": keys["k_seaf"],
-            "k_amf": keys["k_amf"],
-        }
-    
-    def generate_auth_vector_4g(self, ki: bytes, sqn: int, amf: bytes) -> Dict[str, bytes]:
-        """Generate 4G EPS authentication vector per TS 33.401."""
-        rand = secrets.token_bytes(16)
-        sqn_bytes = sqn.to_bytes(6, 'big')
-        
-        res = self.f2(ki, rand)
-        xres = res  # 64-bit for 4G
-        ck = self.f3(ki, rand)
-        ik = self.f4(ki, rand)
-        ak = self.f5(ki, rand)
-        
-        sqn_xor_ak = self._xor(sqn_bytes, ak)
-        mac_a = self.f1(ki, rand, sqn_bytes, amf)
-        autn = sqn_xor_ak + amf.ljust(2, b'\x00')[:2] + mac_a
-        
-        # K_ASME = KDF(CK, IK, SN_ID, ...)
-        k_asme = HMAC.new(ck + ik, b"EPS:KASME" + sqn_bytes, SHA256).digest()
-        
-        return {
-            "rand": rand,
-            "autn": autn,
-            "xres": xres,
-            "res": res,
-            "ck": ck,
-            "ik": ik,
-            "k_asme": k_asme,
-        }
-    
-    def generate_auth_vector_2g3g(self, ki: bytes, rand: bytes = None) -> Dict[str, bytes]:
-        """Generate 2G/3G authentication vector (COMP128 / Milenage)."""
-        if rand is None:
-            rand = secrets.token_bytes(16)
-        
-        sres = self.f2(ki, rand)[:4]  # 32-bit SRES
-        kc = self.f3(ki, rand)[:8]    # 64-bit Kc
-        
-        return {
-            "rand": rand,
-            "sres": sres,
-            "kc": kc,
-        }
-
-
-# Global crypto instance (will be initialized per-subscriber)
-crypto = None
-
-
-def get_crypto(opc_hex: str) -> MilenageCrypto:
-    """Get MilenageCrypto instance for given OPc."""
-    if not CRYPTO_AVAILABLE:
-        raise RuntimeError("pycryptodome not available - install for production crypto")
-    return MilenageCrypto(bytes.fromhex(opc_hex))
+def get_crypto(opc_hex: str) -> Milenage:
+    return Milenage(bytes.fromhex(opc_hex))
 
 
 def derive_opc(op: str, k: str) -> str:
-    """Derive OPc from OP and K using AES-128."""
-    if not CRYPTO_AVAILABLE:
-        import hashlib
-        return hashlib.sha256((op + k).encode()).hexdigest()[:32].upper()
-    op_bytes = bytes.fromhex(op)
-    k_bytes = bytes.fromhex(k)
-    cipher = AES.new(k_bytes, AES.MODE_ECB)
-    opc = cipher.encrypt(op_bytes)
-    return opc.hex().upper()
+    return _derive_opc(bytes.fromhex(op), bytes.fromhex(k)).hex().upper()
 
 
-def derive_5g_keys_simple(k: str, sqn: int, amf: str) -> dict:
-    """Fallback 5G key derivation without pycryptodome."""
-    import hashlib
-    base = k + f"{sqn:012X}" + amf + "00" * 16
-    return {
-        "k_asme": hashlib.sha256((base + "asme").encode()).hexdigest()[:32].upper(),
-        "k_seaf": hashlib.sha256((base + "seaf").encode()).hexdigest()[:32].upper(),
-        "k_ausf": hashlib.sha256((base + "ausf").encode()).hexdigest()[:32].upper(),
-    }
+def serving_plmn() -> bytes:
+    return plmn_id(os.getenv("PLMN_MCC", "641"), os.getenv("PLMN_MNC", "020"))
 
 
-def derive_2g3g_keys_simple(ki: str, rand: str) -> dict:
-    """Fallback 2G/3G key derivation without pycryptodome."""
-    import hashlib
-    base = ki + rand
-    return {
-        "kc": hashlib.md5((base + "kc").encode()).hexdigest()[:16].upper(),
-        "sres": hashlib.md5((base + "sres").encode()).hexdigest()[:8].upper(),
-    }
+def serving_network_name() -> str:
+    mcc = os.getenv("PLMN_MCC", "641")
+    mnc = os.getenv("PLMN_MNC", "020")
+    return os.getenv(
+        "SERVING_NETWORK_NAME", f"5G:mnc{mnc.zfill(3)}.mcc{mcc}.3gppnetwork.org"
+    )
+
+
+# Authentication subscriptions and SQN live behind the UDR (TS 29.504).
+UDR_URL = os.getenv("UDR_URL") or (
+    f"http://{os.getenv('UDR_ADDR', 'custom-udr')}:{os.getenv('UDR_PORT', '8006')}"
+)
+udr = UdrClient(UDR_URL, timeout=float(os.getenv("UDR_TIMEOUT", "3")))
 
 
 # ============================================================================
@@ -345,6 +140,75 @@ def get_db():
 
 def get_redis():
     return redis.Redis(**REDIS_CONFIG)
+
+
+def _udr_credentials(imsi: str) -> Dict[str, Any]:
+    """Read the authentication subscription and its ETag from the UDR."""
+    try:
+        got = udr.get_authentication_subscription(f"imsi-{imsi}")
+    except TransportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"cause": "UDR_UNAVAILABLE", "detail": str(exc)},
+        ) from exc
+    except UdrError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"cause": "UDR_ERROR", "udr_status": exc.status},
+        ) from exc
+    if got is None:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    etag, body = got
+    return {
+        "etag": etag,
+        "k": (body.get("permanentKey") or {}).get("permanentKeyValue"),
+        "ki": body.get("ki"),
+        "opc": (body.get("opc") or {}).get("opcValue"),
+        "op": (body.get("milenage") or {}).get("op"),
+        "amf": body.get("authenticationManagementField") or "8000",
+        "sqn": int(body.get("sequenceNumber") or "0", 16),
+    }
+
+
+def _commit_sqn(imsi: str, etag: str, new_sqn: int) -> bool:
+    """Conditional SQN advance; False means another writer won the race."""
+    try:
+        status, _ = udr.patch_sequence_number(f"imsi-{imsi}", f"{new_sqn:012X}", etag)
+    except TransportError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"cause": "UDR_UNAVAILABLE", "detail": str(exc)},
+        ) from exc
+    if status == 200:
+        return True
+    if status == 412:
+        return False
+    if status == 404:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    raise HTTPException(
+        status_code=502,
+        detail={"cause": "UDR_ERROR", "udr_status": status},
+    )
+
+
+def _generate_with_sqn_cas(imsi: str, build):
+    """Build a vector from the current SQN, then advance SQN conditionally.
+
+    build(creds) returns (payload, new_sqn). If the conditional PATCH answers
+    412, another NF advanced SQN after our read: the vector built from the
+    stale SQN is discarded and build() runs once more on fresh data. Two
+    attempts, then 409 — a vector from a stale SQN is never returned.
+    """
+    for attempt in (1, 2):
+        creds = _udr_credentials(imsi)
+        payload, new_sqn = build(creds)
+        if _commit_sqn(imsi, creds["etag"], new_sqn):
+            return payload
+        logger.warning("SQN contention for %s (attempt %d); rebuilding vector", imsi, attempt)
+    raise HTTPException(
+        status_code=409,
+        detail={"cause": "SQN_CONTENTION", "detail": "SQN changed twice; retry the request"},
+    )
 
 
 def dict_row(cur, row):
@@ -856,6 +720,14 @@ class NudmSmData(BaseModel):
 # ============================================================================
 # Health
 # ============================================================================
+def _suci_profile_summary():
+    try:
+        return suci_lib.configured_profiles()
+    except suci_lib.SuciKeyNotConfigured as exc:
+        logger.error("SUCI profile configuration rejected: %s", exc)
+        return {"error": exc.code, "detail": str(exc)}
+
+
 @app.get("/health")
 def health():
     return {
@@ -863,7 +735,10 @@ def health():
         "service": "udm",
         "version": "3.0.0",
         "modes": ["5G", "4G", "3G", "2G"],
-        "crypto": "milenage" if CRYPTO_AVAILABLE else "fallback",
+        "crypto": "milenage",
+        "crypto_library": CRYPTO_BACKEND,
+        "authentication_data": {"source": "udr", "url": UDR_URL},
+        "suci_profiles": _suci_profile_summary(),
         "specs": ["TS 29.503", "TS 29.272", "TS 29.228", "TS 33.501", "TS 33.102", "TS 23.008"]
     }
 
@@ -905,16 +780,9 @@ def create_subscriber(sub: SubscriberCreate):
         elif sub.op and sub.ki and not opc:
             opc = derive_opc(sub.op.upper(), sub.ki.upper())
         
-        # Auto-derive 5G keys if K provided
+        # K_ASME/K_SEAF/K_AUSF are per-authentication outputs (TS 33.501 A.6),
+        # not subscriber credentials, so provisioning stores only K/OPc and SQN.
         keys_5g = {"k_asme": sub.k_asme, "k_seaf": sub.k_seaf, "k_ausf": sub.k_ausf}
-        if sub.k and not any(keys_5g.values()):
-            if CRYPTO_AVAILABLE and opc:
-                crypto = get_crypto(opc)
-                derived = crypto.derive_5g_keys(bytes.fromhex(sub.k), sub.sqn, bytes.fromhex(sub.amf))
-                keys_5g = {k: v.hex().upper() for k, v in derived.items()}
-            else:
-                derived = derive_5g_keys_simple(sub.k.upper(), sub.sqn, sub.amf.upper())
-                keys_5g = derived
         
         cur.execute(
             """INSERT INTO tbl_subscriber
@@ -1057,113 +925,75 @@ def get_full_profile(imsi: str):
 # ============================================================================
 @app.get("/subscribers/{imsi}/auth-vector", response_model=AuthVectorResponse)
 def get_auth_vector(imsi: str, rand: Optional[str] = None, algorithm: str = "milenage"):
-    """Generate authentication vector for 5G/4G/3G/2G AKA."""
-    conn = get_db()
-    try:
-        cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT * FROM tbl_subscriber WHERE imsi=%s", (imsi,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Subscriber not found")
-        
-        # Generate RAND if not provided
+    """Generate an authentication vector for 5G/4G/3G/2G AKA.
+
+    Credentials and SQN are read from the UDR and the SQN is advanced with a
+    conditional PATCH (TS 29.504), so a concurrent consumer cannot cause a
+    lost update or make us return a vector built on a stale SQN.
+    """
+    if rand:
+        try:
+            bytes.fromhex(rand)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="RAND_MALFORMED: rand must be hex")
+
+    def build(creds):
+        if not creds["opc"]:
+            raise HTTPException(status_code=400, detail="AUTH_CREDENTIALS_MISSING: opc not provisioned")
+        if not creds["k"] and not creds["ki"]:
+            raise HTTPException(
+                status_code=400, detail="AUTH_CREDENTIALS_MISSING: neither K nor Ki provisioned"
+            )
+
         rand_bytes = bytes.fromhex(rand) if rand else secrets.token_bytes(16)
-        rand_hex = rand_bytes.hex().upper()
-        
-        # Default response values
-        autn = "00" * 16
-        res = "00" * 8
-        xres = "00" * 32
-        xres_star = "00" * 64
-        ck = "00" * 32
-        ik = "00" * 32
-        k_asme = "00" * 64
-        k_seaf = "00" * 64
-        k_ausf = "00" * 64
-        k_amf = "00" * 64
-        sres = "00" * 8
-        kc = "00" * 16
-        
-        amf_bytes = bytes.fromhex(row["amf"])
-        sqn = row["sqn"]
-        
-        # 5G AKA (if K present)
-        if row.get("k") and row.get("opc"):
-            if CRYPTO_AVAILABLE:
-                crypto = get_crypto(row["opc"])
-                k_bytes = bytes.fromhex(row["k"])
-                av = crypto.generate_auth_vector_5g(k_bytes, sqn, amf_bytes)
-                rand_bytes = av["rand"]
-                rand_hex = rand_bytes.hex().upper()
-                autn = av["autn"].hex().upper()
-                xres_star = av["xres_star"].hex().upper()
-                res = av["res"].hex().upper()
-                xres = av["xres_star"].hex().upper()  # Use XRES* for both
-                ck = av["ck"].hex().upper()
-                ik = av["ik"].hex().upper()
-                k_ausf = av["k_ausf"].hex().upper()
-                k_seaf = av["k_seaf"].hex().upper()
-                k_amf = av["k_amf"].hex().upper()
-                # K_ASME = K_SEAF for 5G (or derived)
-                k_asme = av["k_seaf"].hex().upper()
-            else:
-                # Fallback
-                keys = derive_5g_keys_simple(row["k"], sqn, row["amf"])
-                import hashlib
-                autn = hashlib.sha256((row["k"] + rand_hex + f"{sqn:012X}" + row["amf"]).encode()).hexdigest()[:32].upper()
-                xres_star = hashlib.sha256((row["k"] + rand_hex).encode()).hexdigest()[:64].upper()
-                res = xres_star[:16]
-                xres = xres_star
-                ck = ik = hashlib.sha256((row["k"] + rand_hex + "ckik").encode()).hexdigest()[:32].upper()
-                k_ausf = k_seaf = k_amf = keys["k_seaf"]
-                k_asme = keys["k_asme"]
-        
+        amf_bytes = bytes.fromhex(creds["amf"])
+        sqn = creds["sqn"]
+
+        # Populated only by the credential path that matches this subscriber.
+        autn = res = xres = xres_star = ""
+        ck = ik = k_asme = k_seaf = k_ausf = k_amf = ""
+        sres = kc = ""
+
+        # 5G AKA (if K present): UDM returns the HE AV only — RAND, AUTN,
+        # XRES* and KAUSF. KSEAF/KAMF belong to the AUSF (TS 33.501 §6.1.3.2).
+        if creds["k"]:
+            crypto = get_crypto(creds["opc"])
+            av = crypto.generate_5g_he_av(
+                bytes.fromhex(creds["k"]), sqn, amf_bytes,
+                serving_network_name(), rand=rand_bytes,
+            )
+            autn = av["autn"].hex().upper()
+            xres_star = av["xres_star"].hex().upper()
+            res = av["res"].hex().upper()
+            xres = xres_star
+            ck = av["ck"].hex().upper()
+            ik = av["ik"].hex().upper()
+            k_ausf = av["k_ausf"].hex().upper()
+
         # 4G AKA (if Ki present, no 5G)
-        elif row.get("ki") and row.get("opc"):
-            if CRYPTO_AVAILABLE:
-                crypto = get_crypto(row["opc"])
-                ki_bytes = bytes.fromhex(row["ki"])
-                av = crypto.generate_auth_vector_4g(ki_bytes, sqn, amf_bytes)
-                rand_bytes = av["rand"]
-                rand_hex = rand_bytes.hex().upper()
-                autn = av["autn"].hex().upper()
-                xres = av["xres"].hex().upper()
-                res = av["res"].hex().upper()
-                ck = av["ck"].hex().upper()
-                ik = av["ik"].hex().upper()
-                k_asme = av["k_asme"].hex().upper()
-            else:
-                import hashlib
-                autn = hashlib.sha256((row["ki"] + rand_hex + f"{sqn:012X}" + row["amf"]).encode()).hexdigest()[:32].upper()
-                xres = hashlib.sha256((row["ki"] + rand_hex).encode()).hexdigest()[:16].upper()
-                res = xres
-                ck = ik = hashlib.sha256((row["ki"] + rand_hex + "ckik").encode()).hexdigest()[:32].upper()
-                k_asme = hashlib.sha256((ck + ik + f"{sqn:012X}").encode()).hexdigest()[:64].upper()
-        
+        elif creds["ki"]:
+            crypto = get_crypto(creds["opc"])
+            av = crypto.generate_eps_av(
+                bytes.fromhex(creds["ki"]), sqn, amf_bytes,
+                sn_id=serving_plmn(), rand=rand_bytes,
+            )
+            autn = av["autn"].hex().upper()
+            xres = av["xres"].hex().upper()
+            res = av["res"].hex().upper()
+            ck = av["ck"].hex().upper()
+            ik = av["ik"].hex().upper()
+            k_asme = av["k_asme"].hex().upper()
+
         # 2G/3G (if Ki present)
-        if row.get("ki"):
-            if CRYPTO_AVAILABLE and row.get("opc"):
-                crypto = get_crypto(row["opc"])
-                ki_bytes = bytes.fromhex(row["ki"])
-                av = crypto.generate_auth_vector_2g3g(ki_bytes, rand_bytes)
-                sres = av["sres"].hex().upper()
-                kc = av["kc"].hex().upper()
-            else:
-                keys = derive_2g3g_keys_simple(row["ki"], rand_hex)
-                sres = keys["sres"]
-                kc = keys["kc"]
-        
-        # Update SQN
-        new_sqn = sqn + 1
-        cur.execute("UPDATE tbl_subscriber SET sqn=%s WHERE imsi=%s", (new_sqn, imsi))
-        conn.commit()
-        
-        r = get_redis()
-        r.delete(f"udm:subscriber:{imsi}")
-        
-        return AuthVectorResponse(
+        if creds["ki"]:
+            crypto = get_crypto(creds["opc"])
+            av = crypto.generate_2g3g_av(bytes.fromhex(creds["ki"]), rand=rand_bytes)
+            sres = av["sres"].hex().upper()
+            kc = av["kc"].hex().upper()
+
+        payload = AuthVectorResponse(
             imsi=imsi,
-            rand=rand_hex,
+            rand=rand_bytes.hex().upper(),
             autn=autn,
             res=res,
             xres=xres,
@@ -1177,8 +1007,11 @@ def get_auth_vector(imsi: str, rand: Optional[str] = None, algorithm: str = "mil
             sres=sres,
             kc=kc,
         )
-    finally:
-        conn.close()
+        return payload, sqn + 1
+
+    result = _generate_with_sqn_cas(imsi, build)
+    get_redis().delete(f"udm:subscriber:{imsi}")
+    return result
 
 
 @app.post("/subscribers/{imsi}/auth-vector/generate", response_model=AuthVectorResponse)
@@ -1344,66 +1177,60 @@ class GenerateAuthDataResponse(BaseModel):
 @app.post("/nudm-ueau/v1/{supi_or_suci}/security-information/generate-auth-data", response_model=GenerateAuthDataResponse)
 def generate_auth_data(supi_or_suci: str, req: GenerateAuthDataRequest):
     """Generate 5G Authentication Data (TS 29.503 §5.2.2.1).
-    
-    AUSF calls this to get 5G AKA vectors. Handles SUCI de-concealment.
+
+    AUSF calls this to get 5G AKA vectors. Handles SUCI de-concealment. The
+    authentication subscription is read from the UDR and the SQN advance is a
+    conditional PATCH, so a concurrent ARPF consumer cannot lose an SQN.
     """
-    # De-conceal SUCI to SUPI if needed
-    imsi = deconceal_suci(supi_or_suci) if suci_is_suci(supi_or_suci) else supi_or_suci
-    if not imsi:
-        raise HTTPException(status_code=400, detail="Invalid SUPI/SUCI format")
-    
-    conn = get_db()
-    try:
-        cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT * FROM tbl_subscriber WHERE imsi=%s", (imsi,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Subscriber not found")
-        
-        if not row.get("k") or not row.get("opc"):
+    imsi = resolve_identity(supi_or_suci)
+
+    def build(creds):
+        if not creds["k"] or not creds["opc"]:
             raise HTTPException(status_code=400, detail="5G credentials not provisioned")
-        
-        # Generate authentication vector
-        if CRYPTO_AVAILABLE:
-            crypto = get_crypto(row["opc"])
-            k_bytes = bytes.fromhex(row["k"])
-            av = crypto.generate_auth_vector_5g(k_bytes, row["sqn"], bytes.fromhex(row["amf"]))
-            
-            auth_vector = AuthenticationVector5G(
-                rand=av["rand"].hex().upper(),
-                xres_star=av["xres_star"].hex().upper(),
-                autn=av["autn"].hex().upper(),
-                kausf=av["k_ausf"].hex().upper()
-            )
-        else:
-            # Fallback
-            rand = secrets.token_hex(16).upper()
-            keys = derive_5g_keys_simple(row["k"], row["sqn"], row["amf"])
-            import hashlib
-            autn = hashlib.sha256((row["k"] + rand + f"{row['sqn']:012X}" + row["amf"]).encode()).hexdigest()[:32].upper()
-            xres_star = hashlib.sha256((row["k"] + rand).encode()).hexdigest()[:64].upper()
-            
-            auth_vector = AuthenticationVector5G(
-                rand=rand,
-                xres_star=xres_star,
-                autn=autn,
-                kausf=keys["k_ausf"]
-            )
-        
-        # Update SQN
-        new_sqn = row["sqn"] + 1
-        cur.execute("UPDATE tbl_subscriber SET sqn=%s WHERE imsi=%s", (new_sqn, imsi))
-        conn.commit()
-        
-        r = get_redis()
-        r.delete(f"udm:subscriber:{imsi}")
-        
-        return GenerateAuthDataResponse(
-            auth_vectors=[auth_vector],
-            supported_features=req.supported_features
+
+        crypto = get_crypto(creds["opc"])
+        k_bytes = bytes.fromhex(creds["k"])
+        sqn = creds["sqn"]
+
+        # AUTS resynchronisation (TS 33.102 §6.3.3, TS 29.503 §5.2.2.1).
+        if req.resynchronization_info:
+            try:
+                rand_bytes = bytes.fromhex(req.resynchronization_info["rand"])
+                auts_bytes = bytes.fromhex(req.resynchronization_info["auts"])
+            except (KeyError, TypeError, ValueError):
+                raise HTTPException(
+                    status_code=400,
+                    detail="RESYNC_INFO_MALFORMED: rand and auts are required hex strings",
+                )
+            try:
+                sqn = crypto.auts_sqn(k_bytes, rand_bytes, auts_bytes)
+            except AutsVerificationError:
+                raise HTTPException(
+                    status_code=403,
+                    detail="AUTS_VERIFICATION_FAILED: MAC-S mismatch",
+                )
+
+        av = crypto.generate_5g_he_av(
+            k_bytes, sqn, bytes.fromhex(creds["amf"]),
+            req.serving_network_name,
         )
-    finally:
-        conn.close()
+        auth_vector = AuthenticationVector5G(
+            rand=av["rand"].hex().upper(),
+            xres_star=av["xres_star"].hex().upper(),
+            autn=av["autn"].hex().upper(),
+            kausf=av["k_ausf"].hex().upper()
+        )
+        return (
+            GenerateAuthDataResponse(
+                auth_vectors=[auth_vector],
+                supported_features=req.supported_features,
+            ),
+            sqn + 1,
+        )
+
+    result = _generate_with_sqn_cas(imsi, build)
+    get_redis().delete(f"udm:subscriber:{imsi}")
+    return result
 
 
 class HssAvRequest(BaseModel):
@@ -1420,115 +1247,62 @@ class HssAvResponse(BaseModel):
 @app.post("/nudm-ueau/v1/{supi}/hss-security-information/{hss_auth_type}/generate-av", response_model=HssAvResponse)
 def generate_hss_av(supi: str, hss_auth_type: str, req: HssAvRequest):
     """HSS requests EPS/IMS authentication vectors (GetHssAv, TS 29.503 §5.2.2.4).
-    
+
     Called by HSS for S6a/Cx interworking. Supports:
     - eps-aka: EPS AKA (KASME, XRES, RAND, AUTN, CK, IK)
     - ims-aka: IMS AKA (CK, IK, XRES, RAND, AUTN)
     - eap-aka / eap-aka-prime: EAP-AKA / EAP-AKA'
     - gba-aka: GBA AKA
     """
-    conn = get_db()
-    try:
-        cur = conn.cursor(dictionary=True)
-        cur.execute("SELECT * FROM tbl_subscriber WHERE imsi=%s", (supi,))
-        row = cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Subscriber not found")
-        
-        if not row.get("ki") or not row.get("opc"):
+    if hss_auth_type == "eap-aka-prime":
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "EAP_AKA_PRIME_NOT_IMPLEMENTED: CK'/IK' derivation (TS 33.402) "
+                "is not built; refusing to return placeholder vectors"
+            ),
+        )
+
+    def build(creds):
+        if not creds["ki"] or not creds["opc"]:
             raise HTTPException(status_code=400, detail="4G/3G/2G credentials not provisioned")
-        
+
+        crypto = get_crypto(creds["opc"])
+        ki_bytes = bytes.fromhex(creds["ki"])
+        amf_bytes = bytes.fromhex(creds["amf"])
+
         auth_vectors = []
         for i in range(req.num_vectors):
-            rand = secrets.token_bytes(16)
-            rand_hex = rand.hex().upper()
-            
-            if CRYPTO_AVAILABLE:
-                crypto = get_crypto(row["opc"])
-                ki_bytes = bytes.fromhex(row["ki"])
-                sqn = row["sqn"]
-                amf_bytes = bytes.fromhex(row["amf"])
-                
-                if hss_auth_type in ["eps-aka", "eap-aka"]:
-                    av = crypto.generate_auth_vector_4g(ki_bytes, sqn, amf_bytes)
-                    auth_vectors.append({
-                        "av_type": "EPS_AKA",
-                        "rand": rand_hex,
-                        "xres": av["xres"].hex().upper(),
-                        "autn": av["autn"].hex().upper(),
-                        "kasme": av["k_asme"].hex().upper(),
-                        "ck": av["ck"].hex().upper(),
-                        "ik": av["ik"].hex().upper()
-                    })
-                elif hss_auth_type == "ims-aka":
-                    av = crypto.generate_auth_vector_4g(ki_bytes, sqn, amf_bytes)
-                    auth_vectors.append({
-                        "av_type": "IMS_AKA",
-                        "rand": rand_hex,
-                        "xres": av["xres"].hex().upper(),
-                        "autn": av["autn"].hex().upper(),
-                        "ck": av["ck"].hex().upper(),
-                        "ik": av["ik"].hex().upper()
-                    })
-                elif hss_auth_type == "gba-aka":
-                    av = crypto.generate_auth_vector_4g(ki_bytes, sqn, amf_bytes)
-                    auth_vectors.append({
-                        "av_type": "GBA_AKA",
-                        "rand": rand_hex,
-                        "xres": av["xres"].hex().upper(),
-                        "autn": av["autn"].hex().upper(),
-                        "ck": av["ck"].hex().upper(),
-                        "ik": av["ik"].hex().upper()
-                    })
-                else:
-                    # EAP-AKA' fallback
-                    auth_vectors.append({
-                        "av_type": hss_auth_type.upper(),
-                        "rand": rand_hex,
-                        "xres": "00" * 32,
-                        "autn": "00" * 32,
-                        "ck": "00" * 32,
-                        "ik": "00" * 32
-                    })
-            else:
-                # Fallback hash-based
-                import hashlib
-                sqn_bytes = row["sqn"].to_bytes(6, 'big')
-                autn = hashlib.sha256((row["ki"] + rand_hex + f"{row['sqn']:012X}" + row["amf"]).encode()).hexdigest()[:32].upper()
-                xres = hashlib.sha256((row["ki"] + rand_hex).encode()).hexdigest()[:16].upper()
-                ck = ik = hashlib.sha256((row["ki"] + rand_hex + "ckik").encode()).hexdigest()[:32].upper()
-                
-                if hss_auth_type in ["eps-aka", "eap-aka"]:
-                    k_asme = hashlib.sha256((ck + ik + f"{row['sqn']:012X}").encode()).hexdigest()[:64].upper()
-                    auth_vectors.append({
-                        "av_type": "EPS_AKA",
-                        "rand": rand_hex,
-                        "xres": xres,
-                        "autn": autn,
-                        "kasme": k_asme,
-                        "ck": ck,
-                        "ik": ik
-                    })
-                else:
-                    auth_vectors.append({
-                        "av_type": hss_auth_type.upper(),
-                        "rand": rand_hex,
-                        "xres": xres,
-                        "autn": autn,
-                        "ck": ck,
-                        "ik": ik
-                    })
-            
-            # Increment SQN per vector
-            cur.execute("UPDATE tbl_subscriber SET sqn=sqn+1 WHERE imsi=%s", (supi,))
-        
-        conn.commit()
-        r = get_redis()
-        r.delete(f"udm:subscriber:{supi}")
-        
-        return HssAvResponse(auth_vectors=auth_vectors, supported_features=req.supported_features)
-    finally:
-        conn.close()
+            # Each vector must use its own SQN and its own RAND, and the RAND
+            # returned in the response must be the one inside AUTN/XRES.
+            av = crypto.generate_eps_av(
+                ki_bytes, creds["sqn"] + i, amf_bytes,
+                sn_id=serving_plmn(), rand=secrets.token_bytes(16),
+            )
+            vector = {
+                "rand": av["rand"].hex().upper(),
+                "xres": av["xres"].hex().upper(),
+                "autn": av["autn"].hex().upper(),
+                "ck": av["ck"].hex().upper(),
+                "ik": av["ik"].hex().upper(),
+            }
+            if hss_auth_type in ("eps-aka", "eap-aka"):
+                vector["av_type"] = "EPS_AKA"
+                vector["kasme"] = av["k_asme"].hex().upper()
+            elif hss_auth_type == "ims-aka":
+                vector["av_type"] = "IMS_AKA"
+            else:  # gba-aka
+                vector["av_type"] = "GBA_AKA"
+            auth_vectors.append(vector)
+
+        return (
+            HssAvResponse(auth_vectors=auth_vectors, supported_features=req.supported_features),
+            creds["sqn"] + req.num_vectors,
+        )
+
+    result = _generate_with_sqn_cas(supi, build)
+    get_redis().delete(f"udm:subscriber:{supi}")
+    return result
 
 
 @app.post("/nudm-ueau/v1/{supi}/auth-events")
@@ -1583,52 +1357,33 @@ def suci_is_suci(val: str) -> bool:
     return val.startswith("suci-")
 
 
+def resolve_identity(supi_or_suci: str) -> str:
+    """Return the IMSI for a SUPI or SUCI (TS 29.503 uses imsi-<digits>)."""
+    if not suci_is_suci(supi_or_suci):
+        return supi_or_suci[5:] if supi_or_suci.startswith("imsi-") else supi_or_suci
+    try:
+        return suci_lib.deconceal(supi_or_suci)
+    except suci_lib.SuciError as exc:
+        logger.warning("SUCI rejected: %s", exc.code)
+        raise HTTPException(
+            status_code=exc.http_status,
+            detail={"cause": exc.code, "detail": str(exc)},
+        ) from exc
+
+
 def deconceal_suci(suci: str) -> Optional[str]:
-    """De-conceal SUCI to SUPI (IMSI).
-    
-    SUCI format: suci-<supi_type>-<mcc>-<mnc>-<routing_ind>-<protection_scheme>-<home_net_pkid>-<scheme_output>
-    
-    For NULL scheme (0): scheme_output = MSIN in packed BCD
-    For Profile A/B (1/2): ECIES encryption with home network private key
+    """Best-effort de-concealment for internal SDM lookups.
+
+    Returns None so callers answer 404 for an unknown identity; endpoints that
+    expose de-concealment directly use resolve_identity() to keep the cause.
     """
-    if not suci.startswith("suci-"):
+    if not suci_is_suci(suci):
         return None
-    
-    parts = suci.split("-")
-    if len(parts) < 8:
+    try:
+        return suci_lib.deconceal(suci)
+    except suci_lib.SuciError as exc:
+        logger.warning("SUCI de-concealment failed: %s", exc.code)
         return None
-    
-    supi_type = parts[1]
-    mcc = parts[2]
-    mnc = parts[3]
-    routing_ind = parts[4]
-    protection_scheme = parts[5]
-    home_net_pkid = parts[6]
-    scheme_output = parts[7]
-    
-    if supi_type == "0":  # IMSI
-        if protection_scheme == "0":  # NULL scheme
-            msin = bcd_to_msin(scheme_output)
-            return f"{mcc}{mnc}{msin}"
-        elif protection_scheme in ["1", "2"]:  # Profile A or B
-            # Requires ECIES decryption with home network private key (HSM)
-            return None
-    
-    return None
-
-
-def bcd_to_msin(bcd_hex: str) -> str:
-    """Convert packed BCD hex to MSIN string."""
-    msin = ""
-    for i in range(0, len(bcd_hex), 2):
-        byte_val = int(bcd_hex[i:i+2], 16)
-        high = (byte_val >> 4) & 0xF
-        low = byte_val & 0xF
-        if high <= 9:
-            msin += str(high)
-        if low <= 9:
-            msin += str(low)
-    return msin.rstrip('f')
 
 
 @app.post("/nudm-ueid/v1/deconceal")
@@ -1640,12 +1395,10 @@ def ueid_deconceal(req: Dict):
     suci = req.get("suci")
     if not suci:
         raise HTTPException(status_code=400, detail="SUCI required")
-    
-    imsi = deconceal_suci(suci)
-    if not imsi:
-        raise HTTPException(status_code=400, detail="Failed to de-conceal SUCI")
-    
-    return {"supi": f"imsi-{imsi}"}
+    if not suci_is_suci(suci):
+        raise HTTPException(status_code=400, detail="Value is not a SUCI")
+
+    return {"supi": f"imsi-{resolve_identity(suci)}"}
 
 
 # ============================================================================
@@ -3222,17 +2975,13 @@ async def batch_upload(
                     elif op and ki:
                         opc = derive_opc(op.upper(), ki.upper())
                 
-                # Auto-derive 5G keys
-                keys_5g = {"k_asme": None, "k_seaf": None, "k_ausf": None}
-                if auto_derive and k and not any([rec.get("k_asme"), rec.get("k_seaf"), rec.get("k_ausf")]):
-                    sqn = int(rec.get("sqn", 0))
-                    amf = rec.get("amf", "8000").upper()
-                    if CRYPTO_AVAILABLE and opc:
-                        crypto = get_crypto(opc)
-                        derived = crypto.derive_5g_keys(bytes.fromhex(k.upper()), sqn, bytes.fromhex(amf))
-                        keys_5g = {k: v.hex().upper() for k, v in derived.items()}
-                    else:
-                        keys_5g = derive_5g_keys_simple(k.upper(), sqn, amf)
+                # Per-authentication keys are derived at authentication time,
+                # never stored against the subscriber record.
+                keys_5g = {
+                    "k_asme": rec.get("k_asme"),
+                    "k_seaf": rec.get("k_seaf"),
+                    "k_ausf": rec.get("k_ausf"),
+                }
                 
                 cur.execute(
                     """INSERT INTO tbl_subscriber
@@ -3387,35 +3136,23 @@ def allocate_from_range(req: IMSIAllocateRequest):
         for i in range(count):
             imsi = f"{next_num + i:015d}"
             
-            # Derive keys
-            opc = None
-            keys_5g = {"k_asme": None, "k_seaf": None, "k_ausf": None}
             k = req.k or range_row.get("default_k")
             ki = req.ki or range_row.get("default_ki")
             op = req.op or range_row.get("default_op")
             opc = req.opc or range_row.get("default_opc")
-            
+
             if not opc and op and k:
                 opc = derive_opc(op.upper(), k.upper())
             elif not opc and op and ki:
                 opc = derive_opc(op.upper(), ki.upper())
-            
-            if k and not any(keys_5g.values()):
-                if CRYPTO_AVAILABLE and opc:
-                    crypto = get_crypto(opc)
-                    derived = crypto.derive_5g_keys(bytes.fromhex(k.upper()), 0, bytes.fromhex("8000"))
-                    keys_5g = {k: v.hex().upper() for k, v in derived.items()}
-                else:
-                    keys_5g = derive_5g_keys_simple(k.upper(), 0, "8000")
-            
+
             cur.execute(
                 """INSERT INTO tbl_subscriber
                    (imsi, k, ki, op, opc, sqn, amf,
                     k_asme, k_seaf, k_ausf,
                     network_access_mode, subscriber_status, batch_id)
                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
-                (imsi, k, ki, op, opc, 0, "8000",
-                 keys_5g["k_asme"], keys_5g["k_seaf"], keys_5g["k_ausf"],
+                (imsi, k, ki, op, opc, 0, "8000", None, None, None,
                  req.network_access_mode, req.subscriber_status, req.range_name)
             )
             allocated.append(imsi)
@@ -3432,6 +3169,195 @@ def allocate_from_range(req: IMSIAllocateRequest):
         conn.commit()
         
         return {"allocated": allocated, "count": count, "next_imsi": new_next}
+    finally:
+        conn.close()
+
+
+# ============================================================================
+# Nhss Client (UDM -> HSS per TS 29.563) + Central Provisioning + Bidirectional Sync
+# ============================================================================
+from udm.src.provisioning_importer import (
+    provision_sim_card, parse_batch_file, import_batch,
+    apply_hss_imei_update, apply_hss_roaming_update,
+    SimCardRecord,
+)
+
+
+class NhssGenerateAvRequest(BaseModel):
+    imsi: str = Field(..., pattern=r"^[0-9]{5,15}$")
+    authType: str = Field("5G_AKA", pattern="^(5G_AKA|EAP_AKA_PRIME)$")
+    servingNetworkName: str = ""
+    resynchronizationInfo: Optional[Dict] = None
+
+
+@app.post("/nhss-client/generate-av")
+def nhss_client_generate_av(req: NhssGenerateAvRequest):
+    """Nhss_UEAU: UDM requests 5G_AKA/EAP_AKA_PRIME vector from HSS (Option 1).
+    
+    Used when subscriber credentials live in EPS-UDR and HSS acts as ARPF.
+    """
+    try:
+        status, resp = sync_generate_av(req.imsi, req.authType, req.servingNetworkName)
+        return {"status": status, "response": resp}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"HSS unreachable: {str(e)}")
+
+
+@app.post("/nhss-client/pgw-data/{imsi}")
+def nhss_client_pgw_data(imsi: str):
+    """Nhss_SDM: UDM fetches PGW-C+SMF FQDN per APN for PDU continuity (5GC->EPC)."""
+    try:
+        status, resp = sync_get_pgw_data(imsi)
+        return {"status": status, "response": resp}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"HSS unreachable: {str(e)}")
+
+
+@app.post("/nhss-client/deregister-sn")
+def nhss_client_deregister_sn(req: Dict):
+    """Nhss_UECM: UDM tells HSS to cancel EPS/3G serving node (IRAT mobility).
+    
+    Body: { imsi, deregReason, guami? }
+    deregReason: UE_INITIAL_AND_SINGLE_REGISTRATION | UE_INITIAL_AND_DUAL_REGISTRATION
+                 | EPS_TO_5GS_MOBILITY | EPS_TO_5GS_MOBILITY_WITHOUT_N26_IWK
+    """
+    try:
+        status, resp = sync_deregister_sn(req["imsi"], req["deregReason"], req.get("guami"))
+        return {"status": status, "response": resp}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"HSS unreachable: {str(e)}")
+
+
+@app.post("/nhss-client/imei-update/{imsi}")
+def nhss_client_imei_update(imsi: str, req: Dict):
+    """Nhss_UECM: UDM tells HSS about IMEI/PEI change."""
+    try:
+        status, resp = sync_update_imei(imsi, req.get("imei"), req.get("imeiSv"))
+        return {"status": status, "response": resp}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"HSS unreachable: {str(e)}")
+
+
+@app.post("/nhss-client/roaming-update/{imsi}")
+def nhss_client_roaming_update(imsi: str, req: Dict):
+    """Nhss_UECM: UDM tells HSS about roaming status (PLMN) change."""
+    try:
+        status, resp = sync_update_roaming(imsi, req["plmnId"])
+        return {"status": status, "response": resp}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"HSS unreachable: {str(e)}")
+
+
+@app.post("/nhss-client/pp-create/{imsi}")
+def nhss_client_pp_create(imsi: str, af_instance_id: str, req: Dict):
+    """Nhss_PP: UDM pushes external parameters to HSS for EPC enforcement.
+    
+    Body: { referenceId, communicationCharacteristics?, validityTime?, mtcProviderInformation?, supportedFeatures? }
+    """
+    try:
+        status, resp = sync_pp_create(imsi, af_instance_id, req.get("referenceId", f"ref-{uuid.uuid4().hex[:8]}"),
+                                       req.get("communicationCharacteristics"))
+        return {"status": status, "response": resp}
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"HSS unreachable: {str(e)}")
+
+
+# ============================================================================
+# Bidirectional Sync: HSS -> UDM (called by HSS Nhss server)
+# ============================================================================
+
+class HssImeiUpdate(BaseModel):
+    imei: Optional[str] = Field(None, pattern=r"^[0-9]{14,15}$")
+    imei_sv: Optional[str] = Field(None, pattern=r"^[0-9]{16}$")
+
+
+@app.post("/sync/hss/imei-update/{imsi}")
+def hss_imei_update(imsi: str, req: HssImeiUpdate):
+    """HSS notifies UDM of IMEI/PEI change (Nhss_UECM reverse direction).
+    
+    UDM updates canonical subscriber record and EPS-UDR projection.
+    """
+    result = apply_hss_imei_update(imsi, req.imei, req.imei_sv)
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result["errors"])
+    return result
+
+
+@app.post("/sync/hss/roaming-update/{imsi}")
+def hss_roaming_update(imsi: str, req: Dict):
+    """HSS notifies UDM of roaming status (PLMN) change."""
+    plmn_id = req.get("plmnId")
+    if not plmn_id:
+        raise HTTPException(status_code=400, detail="plmnId required")
+    result = apply_hss_roaming_update(imsi, plmn_id)
+    if result["status"] == "error":
+        raise HTTPException(status_code=500, detail=result["errors"])
+    return result
+
+
+# ============================================================================
+# Central SIM Provisioning (single entry point for all views)
+# ============================================================================
+
+@app.post("/provision/sim", status_code=201)
+def provision_single_sim(record: SimCardRecord):
+    """Provision one SIM card across all views (UDM 5G + HSS/HLR 4G/3G/2G).
+    
+    Writes canonical record + all projections in one transaction:
+    - tbl_subscriber (canonical, hssdb)
+    - tbl_5g_subscription (UDM view, if 5G mode)
+    - tbl_eps_subscription (HSS view, if 4G/3G/2G mode)
+    - tbl_eps_apn_profile (PGW-C+SMF FQDN per APN)
+    - tbl_eps_subscriber in eps_udr (HSS front-end for Nhss/S6a/Gr)
+    - IMS, supplementary, roaming projections
+    - Cross-unit sync audit log
+    
+    network_access_mode: 0=GPRS(3G), 1=CS(2G), 2=Both(2G+3G), 3=5G
+    """
+    result = provision_sim_card(record)
+    if result["status"] == "error":
+        raise HTTPException(status_code=400, detail=result["errors"])
+    return result
+
+
+@app.post("/provision/batch", status_code=201)
+async def provision_batch(
+    file: UploadFile = File(...),
+    batch_id: Optional[str] = Form(None),
+):
+    """Bulk provision SIM cards from CSV/JSON file.
+    
+    CSV columns: iccid,imsi,msisdn,ki,k,op,opc,sqn,amf,networkAccessMode,
+                 subscriberStatus,roamingRestricted,apnProfiles(nested JSON),
+                 nssai(nested JSON),supplementaryServices(nested JSON),
+                 roamingProfiles(nested JSON),imsSubscription(nested JSON),
+                 batchId,mvnoMcc,mvnoMnc,n5gcAllowed,pniNpnAllowed
+    
+    JSON: array of SimCardRecord objects.
+    """
+    batch_id = batch_id or f"batch-{uuid.uuid4().hex[:12]}"
+    content = await file.read()
+    
+    try:
+        records = parse_batch_file(content, file.filename or "upload")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Parse error: {str(e)}")
+    
+    result = import_batch(records, batch_id)
+    return result
+
+
+@app.get("/sync/audit/{imsi}")
+def get_sync_audit(imsi: str, limit: int = Query(50, ge=1, le=500)):
+    """Get cross-unit sync audit trail for a subscriber."""
+    conn = get_db()
+    try:
+        cur = conn.cursor(dictionary=True)
+        cur.execute(
+            """SELECT * FROM tbl_sync_audit WHERE imsi=%s ORDER BY created_at DESC LIMIT %s""",
+            (imsi, limit),
+        )
+        return cur.fetchall()
     finally:
         conn.close()
 

@@ -1,0 +1,70 @@
+# HSS Configuration (TS 29.563 V20.0.0, TS 23.632)
+# Nhss service-based interface exposed TO the UDM
+
+server:
+  host: "0.0.0.0"
+  port: 8090
+  workers: 1
+
+nhss:
+  # NF Instance ID for NRF registration
+  nfInstanceId: "${HSS_NF_INSTANCE_ID:-hss-01}"
+  nfType: HSS
+  nfStatus: REGISTERED
+  plmnList:
+    - mcc: "${HSS_PLMN_MCC:-001}"
+      mnc: "${HSS_PLMN_MNC:-01}"
+  sNssais:
+    - sst: 1
+      sd: "000001"
+  # IMSI ranges this HSS serves (for NRF discovery)
+  imsiRanges:
+    - start: "${HSS_IMSI_START:-001010000000000}"
+      end: "${HSS_IMSI_END:-001019999999999}"
+  # HSS Group ID (for UDM selection)
+  groupId: "${HSS_GROUP_ID:-hss-group-1}"
+  # Authentication ownership model (per TS 23.632 L.4)
+  # option1: credentials in EPS-UDR, vectors calculated in HSS
+  # option2: credentials in 5GS-UDR, vectors calculated in UDM
+  # option3: split (5G in UDM, EPS in HSS)
+  authOption: "${HSS_AUTH_OPTION:-1}"
+  # SQN serialization lock (Redis key prefix)
+  sqnLockPrefix: "hss:sqn:lock:"
+
+# EPS-UDR database connection
+epsUdr:
+  host: "${EPS_UDR_DB_HOST:-hssdb}"
+  port: ${EPS_UDR_DB_PORT:-3306}
+  user: "${EPS_UDR_DB_USER:-hss}"
+  password: "${EPS_UDR_DB_PASSWORD:-change-me}"
+  database: "${EPS_UDR_DB_NAME:-eps_udr}"
+
+# NRF connection for NF registration/discovery
+nrf:
+  host: "${NRF_ADDR:-nrf}"
+  port: ${NRF_PORT:-8000}
+
+# UDM endpoint for bidirectional sync (Nudm_UECM_Update)
+udm:
+  host: "${CUSTOM_UDM_HOST:-custom-udm}"
+  port: ${CUSTOM_UDM_PORT:-8080}
+
+# Diameter peers (S6a/S6d, Cx, Sh, SWx, SGd) - populated from tbl_network_node
+diameter:
+  originHost: "${DIAMETER_ORIGIN_HOST:-hss.core.local}"
+  originRealm: "${DIAMETER_ORIGIN_REALM:-core.local}"
+  vendorId: ${DIAMETER_VENDOR_ID:-10415}
+  productName: "${DIAMETER_PRODUCT_NAME:-5G-Core-HSS}"
+  port: ${DIAMETER_PORT:-3868}
+
+# MAP/SCCP peers (Gr, C/D/B/E/F/G, Gd, Lh/Lg)
+map:
+  pointCode: "${MAP_POINT_CODE:-3.14.2}"
+  ssnMap: ${MAP_SSN_MAP:-6}
+  gtMap: "${MAP_GT_MAP:-208010000000000}"
+  port: ${MAP_PORT:-2905}
+
+# Logging
+logging:
+  level: "${LOG_LEVEL:-info}"
+  format: json

@@ -1,0 +1,1501 @@
+================================================================================
+ STAGING READINESS AND CORE BUILD PLAN
+ What to correct, how to prove signalling, and how to reach pre-production
+--------------------------------------------------------------------------------
+ Version 1.0          19 November 2026
+ Target tree          D:\core dpi\5g-core-engine
+ Prepared for         Hamiltel -- own core, and a product line for other
+                      operators and MVNOs
+ Evidence             Every component read from the working tree on 18-19
+                      November 2026; line counts and file paths are real
+ Companion            CORE_LCS_GMLC_BUILD_GUIDE.txt, the three per-domain
+                      files, and 3GPP_STANDARDS_COMPILED.txt
+--------------------------------------------------------------------------------
+ RULE: every correction names a file and a line that was read. Where a claim
+ is inferred rather than observed it is marked VERIFY. Nothing here comes
+ from the OmniCore vendor dump; this document is about your own code.
+================================================================================
+
+
+1. VERDICT IN ONE PAGE
+
+   The repo is further along than a prototype and further from staging than
+   it looks. The problem is not missing features. It is that several
+   components are present, wired, and not doing what their names say:
+
+     - the stack cannot start: 12 host-port collisions in one compose file;
+     - the GMLC, which is the product you intend to sell, returns an
+       MD5 hash of the phone number mapped onto San Francisco;
+     - the custom UPF reads packets and discards them, and says so;
+     - the GMLC config declares MAP and Diameter as enabled; neither
+       exists in its code;
+     - bootstrap.sh starts services by names that do not exist;
+     - the tests directory is empty.
+
+   None of this is hard to fix. Most of it is a day's work. What it means
+   is that no test result produced today can be trusted, because a passing
+   test may be exercising a mock.
+
+   Order of work, and it is not negotiable:
+
+     Week 1   Correct the P0 list in section 3. Nothing is tested until
+              the stack starts and stops lying about itself.
+     Week 2   Bring up staging topology in section 4 and run the transport
+              and Diameter tests in section 5.
+     Week 3-4 Prove one end-to-end path with a real decision at the end of
+              it: a location request that reaches a real GMLC, a real
+              HSS, and returns a real answer or a real error.
+     Then     Build, per section 6, in the order given.
+
+   The single sentence to remember: a core that answers wrongly is worse
+   than a core that refuses to start, because the wrong answer is believed.
+
+
+2. WHAT THE REPO ACTUALLY IS
+
+ 2.1 THE COMPONENT TABLE, MEASURED
+
+   PATH          LINES  WHAT IT IS                    VERDICT
+   ---------------------------------------------------------------------
+   udm/          4,644  Nudm SDM, UEAU, UECM, UEID    real HTTP
+                        on FastAPI                    service
+   hss/          1,101  Nhss REST                     real HTTP
+                                                      service
+   smf/          1,506  PFCP client, IP pools,        partial
+                        GTPv2-C, SM context
+   pcf/          1,006  N7/N15/N5 + config data       partial
+   ocs/            492  credit control                partial
+   camel/          597  CAMEL                          partial
+   map_sccp/       938  SCCP/TCAP/MAP                  partial
+   diameter/       789  Diameter helper                library
+   dra/            228  routing engine                 skeleton
+   gmlc/           238  HTTP facade                    MOCK
+   upf/             73  UDP listener                   STUB
+   scp/            156  service control point          skeleton
+   stp/              0  osmo-stp config only           no code
+   oam/          2,045  Django + React                 real
+   tests/            0  --                            EMPTY
+
+   The 5G NFs are not in this tree at all. They are upstream images pulled
+   by docker-compose at run time (section 2.2).
+
+ 2.2 TWO CORES IN ONE COMPOSE FILE
+
+   docker-compose.yml runs, side by side:
+
+     Free5GC v3.4.0     nrf amf smf upf ausf udm pcf chf scp
+     Open5GS            open5gs-dra
+     Osmocom            osmo-stp
+     Custom Python      custom-udm custom-smf custom-upf custom-pcf
+                        hss gmlc ocs camel map-sccp dra oam
+
+   So there are two UDMs, two SMFs, two UPFs and two PCFs. That is not a
+   design, it is a comparison left running. Until one is chosen per
+   function, no test proves anything: a passing location test may be
+   passing against Free5GC's PCF while your own PCF is idle.
+
+   Decision required, and it is the first commercial decision in this
+   document:
+
+     Keep Free5GC for NFs that are commodity and conformant (NRF, CHF,
+     AUSF, PCF). Build your own only where you have a reason: UDM/UDR,
+     GMLC, STP/DRA, Diameter firewall, SMF policy glue. Everything else
+     is code you will maintain instead of shipping.
+
+ 2.3 THE VENDOR ESTATE AROUND THE REPO
+
+   The repo does not exist alone. On the same disk:
+
+     IPLOOK        the licence you already hold for the SRG (STP with GT
+                   routing), with dra.json and overload.json; real route
+                   table tbl_stp_route with Uganda GTs
+     Protei        SCP platform
+     PaiCore       GMLC, plus the CNA signalling-analytics platform
+     WTL           PGW/UPF
+
+   This matters because osmo-stp in the repo is a stand-in that cannot do
+   what the IPLOOK SRG does. Do not let the stand-in become the plan.
+
+
+3. WHAT TO CORRECT
+
+ 3.1 P0 -- THE STACK DOES NOT START OR DOES NOT TELL THE TRUTH
+
+   ID    ITEM                                       EVIDENCE
+   ---------------------------------------------------------------------
+   P0-1  Twelve host-port collisions                compose as shown
+   P0-2  GMLC returns simulated coordinates          gmlc_server.py:185
+   P0-3  GMLC config declares absent interfaces      gmlc.yaml:26-39
+   P0-4  Custom UPF silently discards packets        upf_server.py:31
+   P0-5  Silent SHA-256 auth-vector fallback         udm_server.py:1379
+   P0-6  Free5GC NFs have no config mounted          config/ holds oam.json
+   P0-7  bootstrap.sh names services that do not     bootstrap.sh:32
+         exist (stp, dra)
+   P0-8  Empty test tree                             tests/ has no files
+   P0-9  Two cores active at once                    section 2.2
+   P0-10 osmo-stp cannot do GT routing               stp/config only
+
+ 3.2 P0-1 THE PORT COLLISIONS, EXACTLY
+
+   Host port collisions found by reading every ports: entry:
+
+     PORT/PROTO   SERVICES
+     ---------------------------------------------------------------------
+     2152/udp     custom-upf, upf
+     2905/udp     map-sccp, osmo-stp
+     2906/sctp    camel, scp
+     3868/sctp    diameter-s6a-cx, open5gs-dra
+     3868/tcp     diameter-s6a-cx, open5gs-dra
+     3869/tcp     ocs, scp
+     42050/tcp    custom-upf, upf
+     8080/tcp     amf, custom-udm
+     8081/tcp     oam, smf
+     8082/tcp     ausf, gmlc
+     8805/udp     custom-upf, smf
+     8805/udp     smf, upf
+
+   Docker will refuse the second service on each port. Replace the whole
+   block with the register in section 4.2. The rule that prevents this
+   recurring: publish only what a tester or an external peer must reach;
+   everything else stays on the compose network and publishes nothing.
+
+ 3.3 P0-2 THE GMLC IS A MOCK
+
+   gmlc_server.py:185 builds a location from md5(msisdn):
+
+     hash_val = int(hashlib.md5(msisdn.encode()).hexdigest()[:8], 16)
+     lat = 37.7749 + (hash_val % 1000) / 10000.0
+     lon = -122.4194 + ...
+
+   Every result is in California. The two "Diameter" routes at
+   gmlc_server.py:102-108 are HTTP POST handlers that echo JSON; no SCTP
+   socket is opened anywhere in the file. The SLh handler returns result
+   code 2001 with a computed "location", which is not what SLh does: SLh
+   returns routing information, not position.
+
+   Why this is the worst item in the list: the GMLC is the product. A
+   demonstration built on this file will pass, look correct on a map, and
+   be worthless. Delete the simulation path and make the service refuse
+   to answer when no real source is configured. A 501 is a better
+   product behaviour than a wrong coordinate.
+
+ 3.4 P0-3 THE GMLC CONFIG LIES
+
+   gmlc/config/gmlc.yaml:26-39 sets:
+
+     map:      enabled: true, stp_host osmo-stp, sctp_role client
+     diameter: enabled: true, port 3869
+
+   Neither is implemented. Configuration that says "enabled" for something
+   absent is worse than configuration that says no, because operations
+   trusts it. Two rules:
+
+     - every "enabled" flag must be asserted at startup: if true and the
+       dependency is missing, exit non-zero with a named error;
+     - the GMLC must never start with both LCS sources disabled.
+
+ 3.5 P0-4 THE CUSTOM UPF IS NOT A UPF
+
+   upf_server.py:24-33 binds UDP 8805 and 2152 and logs:
+
+     "%s received %s bytes from %s (stub, not forwarded)"
+
+   It reads the vendor dpe.json, cpe.json and dpeMgr.json and prints
+   them. There is no eBPF program, no XDP hook, no GTP-U forwarding, no
+   PFCP state machine.
+
+   Consequence for the build documents: every statement about
+   far_map_size, qer_map_size and urr_map_size applies to the WTL/vendor
+   binary on the D: drive, not to this file. Do not size maps in this
+   repo.
+
+   Fix: rename it to something honest (pfcp-sniffer), or delete it. The
+   staging data plane must be Free5GC's UPF (gtp5g) or the vendor binary.
+
+ 3.6 P0-5 AUTH VECTORS FAIL OPEN
+
+   udm_server.py:1379, when the crypto module is unavailable:
+
+     rand = secrets.token_hex(16).upper()
+     keys = derive_5g_keys_simple(...)
+     autn = hashlib.sha256(...)
+
+   These are not 5G AKA vectors. No UE can validate them. In test the
+   handler returns 200 and the engineer concludes authentication works;
+   on a real SIM it fails. Authentication must fail closed. Replace the
+   fallback with HTTP 500 and a metric.
+
+ 3.7 P0-6 THE 5G NFs HAVE NO CONFIG
+
+   config/ contains one file, oam.json. The free5gc services receive only
+   environment variables (AMF_ADDR, NRF_ADDR, GUAMI_*, ...). The upstream
+   free5gc images read YAML from /free5gc/config and do not consume those
+   variables by default.
+
+   VERIFY: run `docker exec core-amf ls /free5gc/config` and check that
+   amfcfg.yaml exists and matches your PLMN. If it does not, the AMF is
+   running the image's default 001/01 configuration and nothing you set
+   in compose is in effect.
+
+   Fix: mount one config directory per NF, version it in git, and add a
+   startup check that prints the loaded PLMN and NRF address.
+
+ 3.8 P0-7 BOOTSTRAP IS BROKEN
+
+   scripts/bootstrap.sh:32 runs `docker-compose up -d stp dra scp udm oam`.
+   The services are named osmo-stp, open5gs-dra, scp, udm/custom-udm, oam.
+   `stp` and `dra` do not exist; the script fails part-way and leaves a
+   half-built stack. Also, DB_ROOT_PASSWORD defaults to 123456 at
+   bootstrap.sh:26.
+
+   Fix: derive service names from `docker compose config --services`, and
+   refuse to run if .env still contains "change-me".
+
+ 3.9 P0-8 THERE ARE NO TESTS
+
+   tests/ exists and is empty. A staging environment without tests only
+   proves that processes start. Section 5 supplies the test list; the
+   first twelve belong in tests/smoke as executable checks, not prose.
+
+ 3.10 P1 -- CORRECT BUT NOT BLOCKING A START
+
+   - SUCI: only the null scheme works; Profiles A and B return None at
+     udm_server.py:1613. Compute SUCI Profiles A/B per TS 33.501 Annex C,
+     or de-conceal at the AUSF. Until then, a production SIM with a
+     concealed SUCI cannot attach.
+   - HSS has no SLh: no 16777291 and no RIR/RIA anywhere in
+     nhss_server.py. This answers verification item V2 as a NO. The GMLC's
+     SLh leg has no server; either add it to the UDM (two weeks) or state
+     in the product that SLh is not supported.
+   - DRA routes only Cx: dra_engine.py:193 hardcodes 16777216. Add SLg,
+     SLh, S6a, S6d, S13, Gx, Rx and the command codes from section 5.2.
+   - GMLC command codes are wrong: it uses 302 for "SLh LIR" and 303 for
+     "SLg SLR" (gmlc_server.py:161, 175). 302 is Server-Assignment in Cx;
+     SLh RIR is 8388622 and SLg PLR is 8388620.
+   - GMLC timestamps use loop time, not wall clock (gmlc_server.py:134).
+     That value is a float since boot; it cannot be used in a CDR.
+   - Request IDs restart at zero on every restart (self._request_counter).
+     Make them durable and globally unique before anything is billed.
+   - Privacy check is a single global comparison
+     (gmlc_server.py:116-123). There is no per-client class, no LCS client
+     table, no override audit. This is the LCS privacy model; it is not
+     optional under UCC regulation.
+
+ 3.11 P2 -- BEFORE A CUSTOMER SEES IT
+
+   - Secrets: .env.example ships "change-me" everywhere, and .gitignore
+     covers .env but not a stray copy. Generate secrets; never commit.
+   - OAM has no role separation surfaced in the tree; check before
+     exposing it beyond localhost.
+   - No signalling KPIs. Add counters for Diameter result codes, MAP
+     errors, SCTP associations, PFCP sessions and GTP-U drops. Without
+     them pre-production acceptance is opinion, not measurement.
+
+
+4. TARGET ARCHITECTURE
+
+ 4.1 TWO ENVIRONMENTS, TWO PURPOSES
+
+     STAGING      one host, everything reachable, mocks allowed but
+                  labelled, used for integration and break-fix.
+     PRE-PROD     same manifests, real interconnect peers (MTN STP),
+                  no mocks, change-controlled, used for acceptance.
+
+   Both come from this repo. The difference is configuration and network
+   reachability, not code. If they ever diverge in code, the acceptance
+   result means nothing.
+
+ 4.2 AUTHORITATIVE PORT AND ADDRESS REGISTER
+
+   Host-published ports. Anything not listed publishes nothing.
+
+     SERVICE        PORT   PROTO  PURPOSE
+     ---------------------------------------------------------------------
+     amf            8001   tcp    SBI (Namf)
+     amf            38412  sctp   N2 (NGAP)
+     nrf            8000   tcp    discovery
+     smf            8002   tcp    SBI (Nsmf)
+     smf            80     --     internal only, no publish
+     upf            8805   udp    N4 (PFCP)
+     upf            2152   udp    N3 (GTP-U)
+     ausf           8008   tcp    SBI (Nausf)
+     udm (f5gc)     18083  tcp    SBI (Nudm) - reference profile only
+     custom-udm     8007   tcp    SBI plus REST admin
+     custom-udr     8006   tcp    Nudr (TS 29.504), authentication subscription
+     pcf (f5gc)     8004   tcp    SBI (Npcf)
+     custom-pcf     7777   tcp    N7/N15/N5
+     chf            8005   tcp    SBI (Nchf)
+     hss            8090   tcp    Nhss REST
+     gmlc           8082   tcp    MLP and admin
+     dra            3868   sctp   Diameter to peers
+     dra            3868   tcp    Diameter over TCP peers
+     diameter-s6a   3869   sctp   only if exposed; default none
+     ocs            3870   sctp   Gy/Ro
+     scp            3871   sctp   CAMEL / Diameter
+     osmo-stp       2905   sctp   M3UA
+     map-sccp       2906   sctp   M3UA ASP to osmo-stp
+     camel          2907   sctp   M3UA ASP to osmo-stp
+     oam            8081   tcp    web
+     grafana        3000   tcp
+     prometheus     9090   tcp
+     db             3306   tcp    bind 127.0.0.1 only
+     hssdb          3307   tcp    bind 127.0.0.1 only
+     redis          6379   tcp    bind 127.0.0.1 only
+     mongo          27017  tcp    bind 127.0.0.1 only
+
+   Internal addressing, staging host 10.1.13.10/24:
+
+     10.1.13.10  host        all published ports
+     10.1.13.11  amf         n2 endpoint seen by the gNB
+     10.1.13.12  upf         n3 endpoint seen by the gNB
+     10.1.13.20  dra         Diameter signalling address
+     10.1.13.21  stp         M3UA signalling address
+
+   In Kubernetes these become Multus interface addresses (section 8.3).
+
+ 4.3 COMPOSE PROFILES
+
+   Split the file into profiles so that a person can bring up one core:
+
+     profiles: [core5g]    nrf amf smf upf ausf udm pcf chf scp
+     profiles: [custom]    custom-udm custom-smf custom-upf custom-pcf
+     profiles: [ss7]       osmo-stp map-sccp camel ocs
+     profiles: [lcs]       gmlc hss openg5s-dra
+     profiles: [obs]       prometheus grafana
+     profiles: [lab]       ueransim, diameter test peer, packet capture
+
+   Default: core5g + lcs + obs. `custom` is opt-in and never runs beside
+   core5g without an explicit statement of which one is authoritative.
+
+ 4.4 NAMING, REALMS AND PLMN
+
+   One PLMN everywhere. Today the repo has three:
+
+     001/01            free5gc env and defaults (test PLMN)
+     641/020           IPLOOK SRG realm mnc020.mcc641.3gppnetwork.org
+     core.local        Diameter realms for custom services
+
+   Pick the allocated production values, put them in one file
+   (config/plmn.yaml), and generate every NF config from it. Keep the
+   test PLMN for staging only, and make it visibly different so a test
+   record can never be mistaken for a production record.
+
+   Diameter realm: use the 3GPP form mncXXX.mccYYY.3gppnetwork.org, not
+   core.local. Peers reject or mis-route core.local.
+
+ 4.5 THE MTN INTERCONNECT, AS ALREADY AGREED
+
+   These are from the integration thread in hamilton integrations/, not
+   invented. Use them in pre-production and in the STP test plan:
+
+     transport      SIGTRAN (M3UA over SCTP); the STP/DRA does not
+                    do SIP
+     VLAN           1673
+     MTN subnet     10.55.55.0/30  (.1 MTN, .2 Hamiltel)
+     site pair      Mbuya 10.55.55.5/30, Mutundwe 10.55.55.6/30
+     links          6 per site, per the MTN spreadsheet
+     peer template  Huawei, reviewed by IPLOOK
+
+   A pre-production STP test is not valid until the M3UA ASP is active
+   against both MTN sites and the routing context matches their template.
+
+
+5. SIGNALLING TEST PLAN
+
+ 5.0 THE PRINCIPLE
+
+   Test at the lowest layer that can fail, and never accept a higher
+   layer's success as proof of a lower one. A successful location answer
+   proves nothing if the Diameter leg was mocked. Order: transport,
+   then protocol, then procedure, then service.
+
+   Every test below has: setup, action, observable, pass criterion. If a
+   test cannot name its observable, it is not a test.
+
+ 5.1 LAYER 0 -- TRANSPORT
+
+     T0.1  SCTP listening
+       action      ss -lnts ; ss -lnup
+       observable  the expected socket and port per section 4.2
+       pass        every published port present, no duplicates
+
+     T0.2  SCTP association to a peer
+       action      sctp_test -H <local> -P <lport> -h <peer> -p <pport>
+       observable  INIT/INIT-ACK in tcpdump, state ESTABLISHED
+       pass        association up within 5 s, survives a 60 s idle
+
+     T0.3  M3UA ASP state
+       action      read osmo-stp VTY or logs
+       observable  ASP-UP then ASP-ACTIVE for each AS
+       pass        all AS active; one link down does not drop the AS
+
+     T0.4  Diameter peer
+       action      start the app, watch CER/CEA
+       observable  CER sent, CEA with Result-Code 2001
+       pass        peer table shows I-OPEN; DWR/DWA every 30 s
+
+     T0.5  MTU and fragmentation
+       action      send a 4 KB Diameter message over SCTP
+       observable  reassembly succeeds; no silent truncation
+       pass        full payload received and parsed
+
+ 5.2 DIAMETER COMMAND-CODE REGISTER
+
+   Put this in the DRA dictionary and in the test tool. Codes are from the
+   specifications named in the standards file.
+
+     INTERFACE  APP ID     MESSAGE                  CODE
+     ---------------------------------------------------------------------
+     Cx         16777216   User-Authorization        301
+     Cx         16777216   Server-Assignment         302
+     Cx         16777216   Location-Information      303
+     Cx         16777216   Multimedia-Auth           304
+     Cx         16777216   Registration-Termination  305
+     Cx         16777216   Push-Profile              306
+     S6a/S6d    16777251   Update-Location           316
+     S6a/S6d    16777251   Authentication-Information 317
+     S6a/S6d    16777251   Insert-Subscriber-Data    318
+     S6a/S6d    16777251   Delete-Subscriber-Data    319
+     S6a/S6d    16777251   Purge-UE                  320
+     S6a/S6d    16777251   Reset                     321
+     S6a/S6d    16777251   Notify                    322
+     S6a/S6d    16777251   Cancel-Location           323
+     S13        16777252   ME-Identity-Check         324
+     SLh        16777291   Routing-Info              8388622
+     SLg        16777255   Provide-Location          8388620
+     SLg        16777255   Location-Report           8388621
+     Gx         16777238   Credit-Control            272
+     Gx         16777238   Re-Auth                  258
+     Rx         16777236   AA-Request               265
+     Rx         16777236   Re-Auth                  258
+     Rx         16777236   Session-Termination      275
+     Rx         16777236   Abort-Session            274
+     Gy         4          Credit-Control            272
+     Diameter   --         Capabilities-Exchange    257
+     Diameter   --         Disconnect-Peer          282
+     Diameter   --         Watchdog                 280
+
+   Note the two 272 entries: Gx and Gy share a command code and are
+   separated by Application-Id only. A DRA that routes on command code
+   alone will send credit control to the wrong peer. Route on the pair.
+
+ 5.3 S6a -- MME TO HSS
+
+     T6a.1  AIR/AIA
+       action      MME sends AIR for a known IMSI
+       observable  AIA with 1 to 5 E-UTRAN vectors, Result 2001
+       pass        vectors validate against MILENAGE test data (35.207)
+
+     T6a.2  AIR for unknown IMSI
+       observable  Result 5001 (user unknown)
+       pass        exactly one error, no retry storm
+
+     T6a.3  ULR/ULA
+       observable  2001, Subscription-Data with APN-Configuration
+       pass        MME stores it and subsequent attach uses it
+
+     T6a.4  Cancel-Location
+       action      HSS cancels while the UE is attached
+       observable  CLR/CLA 2001, MME detaches the UE
+       pass        UE re-attaches within one attempt
+
+     T6a.5  Purge-UE
+       pass        2001, then the HSS answers AIR with 5001
+
+ 5.4 Cx -- IMS
+
+     Tcx.1  UAR/UAA       2001, server capabilities
+     Tcx.2  MAR/MAA       SIP digest vector present
+     Tcx.3  SAR/SAA       2001, assigned server name
+     Tcx.4  LIR/LIA       2001, S-CSCF name
+     Tcx.5  RTR/RTA       registration terminated, 2001
+     Tcx.6  PPR/PPA       2001, profile pushed
+
+   Skip this block if IMS is out of phase 1 scope; say so explicitly.
+
+ 5.5 SLh -- GMLC TO HSS
+
+   Today there is no server. Either build RIR/RIA into the UDM (two
+   weeks) or mark SLh unsupported in the product. If built:
+
+     Tslh.1  RIR for a known MSISDN
+       observable  RIA with User-Name IMSI and serving node
+       pass        2001 within 2 s
+     Tslh.2  RIR for unknown MSISDN
+       pass        5001, and the GMLC returns a defined error to the
+                   LCS client, not a timeout
+     Tslh.3  RIR with only an IMSI
+       pass        2001, MSISDN returned
+
+ 5.6 SLg -- GMLC TO MME
+
+     Tslg.1  PLR immediate
+       setup       UE attached, location known
+       observable  PLA with Location-Estimate and accuracy
+       pass        2001, accuracy meets the requested QoS
+     Tslg.2  PLR with unsupported QoS
+       pass        5012 or a negotiated lower accuracy, never a crash
+     Tslg.3  PLR for an unknown subscriber
+       pass        5001
+     Tslg.4  LRR deferred event
+       setup       deferred request armed
+       observable  LRA delivered when the event fires
+       pass        event delivered once, not duplicated
+     Tslg.5  Cancel
+       action      cancel the deferred request
+       pass        no further LRA for that request
+
+   All SLg tests require the 29.172 specification, which is not readable
+   from the copy on disk. Re-download before running them.
+
+ 5.7 GX / RX / GY
+
+     Tgx.1  CCR-I on PDU session establishment
+       pass        CCA-I 2001, default bearer QoS installed
+     Tgx.2  CCR-U on QoS change              pass  2001
+     Tgx.3  CCR-T on release                 pass  2001
+     Tgx.4  RAR from PCF mid-session         pass  RAA 2001, rule applied
+     Trx.1  AAR for an application session   pass  AAA 2001
+     Tgy.1  CCR-I with a 100 MB grant        pass  CCA-I with quota
+     Tgy.2  quota exhausted                  pass  CCR-U, new grant or
+                                                   4012
+     Tgy.3  OCS down
+       pass        defined failure action, not a hung session
+
+ 5.8 MAP / TCAP / SCCP
+
+     TMAP.1  SRI-SM (45) for an own subscriber
+       pass        ack with IMSI and MSC address
+     TMAP.2  SRI-SM for a foreign subscriber
+       pass        routed to the correct partner STP, not dropped
+     TMAP.3  SRI-for-LCS (85)
+       pass        ack with serving node; error 6 if privacy denies
+     TMAP.4  SLR (86) / PSL (83)
+       pass        response within the configured timeout
+     TMAP.5  PSI (70), ATI (71)
+       pass        answer or a defined MAP error
+     TMAP.6  Unknown GT
+       pass        MAP error, and the STP does not forward it
+     TMAP.7  Disallowed opcode
+       pass        rejected at the STP, counted, alerted
+
+   TMAP.6 and TMAP.7 are the screening tests. Today they will fail,
+   because osmo-stp has no GT or opcode screening. That is the gap the
+   Diameter/SS7 firewall in section 7 exists to close.
+
+ 5.9 PFCP -- N4
+
+     TP.1  Association Setup              pass  5/6, 2001-equivalent
+     TP.2  Heartbeat                      pass  periodic, 1/2 paired
+     TP.3  Session Establishment          pass  50/51, SEID returned
+     TP.4  Create FAR, QER, URR together pass  all three installed
+     TP.5  Session Modification           pass  52/53, rule replaced
+     TP.6  Session Deletion               pass  54/55, counters returned
+     TP.7  Session Report (URR threshold)
+       pass       56/57 received by SMF, CDR partial written
+     TP.8  Association loss
+       pass       SMF detects, re-establishes, no orphan sessions
+
+ 5.10 GTP-C
+
+     TG.1  Echo                           pass  1/2
+     TG.2  Create Session                 pass  32/33 with TEIDs
+     TG.3  Modify Bearer                  pass  34/35
+     TG.4  Delete Session                 pass  36/37
+     TG.5  Downlink Data Notification     pass  176/177, paging starts
+
+ 5.11 GTP-U
+
+     TU.1  Echo                           pass  1/2 over N3
+     TU.2  Uplink packet                  pass  arrives at UPF, counted
+     TU.3  Downlink to idle UE            pass  buffered, DDN, delivered
+     TU.4  Oversize packet                pass  not silently dropped
+     TU.5  Tunnel teardown                pass  no leak into another
+                                                 session's tunnel
+
+   TU.4 is the one that decides whether large images load on a feature
+   phone. It is not a tuning detail.
+
+ 5.12 NGAP AND NAS -- ONE REAL ATTACH
+
+     TNAS.1  NG Setup                     pass  gNB accepted, PLMN match
+     TNAS.2  Registration Request
+       pass        AMF selects AUSF, AUSF calls Nudm_UEAU
+     TNAS.3  Authentication
+       pass        RAND/AUTN to UE, RES* back, HXRES* matches
+     TNAS.4  Security Mode                pass  NAS ciphered
+     TNAS.5  Registration Accept
+       pass        UECM registration written in the UDM (Nudm_UECM)
+     TNAS.6  PDU Session Establishment
+       pass        SMF selects UPF, PFCP session, IP allocated
+     TNAS.7  Ping through the tunnel      pass  0 percent loss
+     TNAS.8  Deregistration               pass  UECM entry removed
+
+   Use UERANSIM as gNB and UE for staging. It is the only way to exercise
+   SUCI and 5G-AKA without a radio.
+
+ 5.13 END-TO-END LOCATION
+
+     TE2E.1  4G: LCS client -> GMLC -> SLg -> MME -> SLs -> E-SMLC -> UE
+       pass        position returned, accuracy recorded, CDR written
+     TE2E.2  5G: LCS client -> GMLC -> NLg -> LMF -> NRPPa -> gNB
+       pass        position returned, no fallback to a mock
+     TE2E.3  Privacy denial
+       pass        denied at the GMLC before any network request is sent
+     TE2E.4  Roaming subscriber
+       pass        request refused at the DRA by IMSI prefix
+
+   TE2E.3 is a regulatory requirement, not a feature. If the request
+   reaches the MME before privacy is decided, the design is wrong.
+
+ 5.14 TOOLING
+
+     packet capture   tcpdump -i any -s0 -w cap.pcap
+     dissection       tshark -d sctp,ppid==29,lcsap
+                      tshark for diameter, map, pfcp, gtp
+     SCTP             lksctp-tools (sctp_test, sctp_darn)
+     Diameter         a scripted peer (freeDiameter, Seagull) and your
+                      own DRA test harness
+     gNB and UE       UERANSIM
+     user plane       iperf3, ping, tcpreplay
+     visibility       PaiCore CNA if licensed; otherwise tshark plus
+                      your own counters
+     chaos            tc qdisc loss and delay, iptables drops, process
+                      kill during a session
+
+   Every capture used to prove a test gets committed with the result.
+   An unwitnessed pass is a rumour.
+
+ 5.15 THE GATE
+
+   Staging is "ready for pre-production" when, in one continuous run:
+
+     1  stack starts from clean with no manual steps
+     2  all T0 transport tests pass
+     3  all S6a, SLh (if built), SLg, PFCP and GTP tests pass
+     4  TNAS.1 to TNAS.8 pass with a real SIM profile
+     5  TE2E.1 returns a position that matches the cell the UE is on
+     6  TE2E.3 and TE2E.4 deny correctly
+     7  no service restarts during the run
+     8  every failure injects a defined error, never a hang
+
+   Item 5 is the acceptance criterion. A position that does not match the
+   serving cell is a wrong answer, however plausible it looks.
+
+
+6. THE CUSTOM CODE PLAN
+
+ 6.1 PRINCIPLES
+
+   1  One writer per datum. The UDM writes subscriber state; nobody
+      else. If two services write, you have two truths.
+   2  Fail closed. No fallback that fabricates a security artefact.
+   3  Every interface has a specification and a test. No test, no merge.
+   4  Stateless where possible, durable where required. Sessions in
+      Redis are acceptable; CDRs and balances are not.
+   5  No mock in a build that is called staging. A mock is a profile
+      named mock, and its outputs are marked.
+
+ 6.2 SHARED LIBRARY
+
+   Build once, use everywhere, in a package `corelib`:
+
+     corelib/config      load, validate, assert-at-startup
+     corelib/log         structured JSON, request and session correlation
+     corelib/metrics     prometheus counters and histograms
+     corelib/diameter    peer state machine, dictionary, AVP validation
+     corelib/sbi         HTTP/2 client and server, problem+json errors
+     corelib/pfcp        header, IE encode/decode, session table
+     corelib/db          pooled access, migrations, outbox
+     corelib/idgen       durable, monotonic request and session ids
+
+   The absence of this library is why the GMLC, DRA and UDM each have
+   their own half-implementations. Adding it is the highest-leverage
+   two weeks in the plan.
+
+ 6.3 NODE BY NODE
+
+   UDM / UDR
+     exists    Nudm SDM, UEAU, UECM, UEID over FastAPI; 4,644 lines
+     build     SUCI Profiles A/B; SLh RIR/RIA; a durable notification
+               outbox with a monotonic version; per-dataset Nudr storage
+     keep      key custody in the HSS or an AuC, not in the UDM database
+     accept    TE2E.1 and TNAS.3 pass, SLh tests pass
+     effort    4-6 weeks
+
+   AUSF
+     exists    Free5GC image
+     build     nothing unless you choose to own it; configure it to reach
+               the UDM and assert the SUCI path at startup
+     accept    TNAS.3 with a concealed SUCI
+     effort    3-5 days
+
+   AMF
+     exists    Free5GC image with Namf_Location service operations
+     build     prove it: call provide-loc-info, cancel-pos-info and
+               loc-update against it; add UECM registration if the image
+               does not already do it
+     accept    TNAS.5 shows an AMF registration row in the UDM
+     effort    1 week to prove and wire
+
+   LMF
+     exists    nothing; there is no lmf service in the compose
+     build     Nlmf server, NRPPa client to the gNB, LPP relay, and the
+               NLg server for the GMLC
+     accept    TE2E.2
+     effort    6-8 weeks; this is the real 5G location gap
+
+   MME
+     exists    nothing in this tree; the MME is external
+     build     only if it is yours to build. First prove whether the
+               MME you have answers SLg. If it does, this is integration,
+               not code.
+     accept    Tslg.1 to Tslg.5
+     effort    2 days to find out, then scope what remains
+
+   MSC
+     exists    external; the repo has MAP and CAMEL helpers only
+     build     do not build an MSC. Route to it. Build the USSD API
+               authentication and the configurable MAP timeout in the
+               helpers you already have
+     accept    TMAP.1 to TMAP.5
+     effort    1-2 weeks for the helper fixes
+
+   SMF
+     exists    custom PFCP client, IP pools, GTPv2-C, 1,506 lines
+     build     a charging client (Gy to the OCS or N40 to the CHF), a
+               CDR writer, and an explicit discovery decision (static or
+               NRF). Fix AMBR handling: session AMBR and per-session
+               AMBR are different fields.
+     accept    Tgx.1 to Tgx.3 and Tgy.1 to Tgy.3
+     effort    3-4 weeks for charging, 1 week for the rest
+
+   UPF
+     exists    a stub; the real data plane is the vendor binary or
+               free5gc upf with gtp5g
+     build     nothing in Python. Publish the vendor binary through this
+               repo and delete the stub from the default profile
+     package   deploy upf-R4.1.4.1067-Ra-1cde0...native.Debian12
+               (94 MB, native data path). Do not deploy the 1066
+               generic build (286 MB); it is the slow-path comparison
+               image, not the production one
+     accept    TU.1 to TU.5
+     effort    1 week to integrate and prove
+
+   PCF / PCRF
+     exists    custom PCF 1,006 lines plus Free5GC PCF
+     build     pick one. Make policy associations durable, make the UDR
+               URI explicit, and alarm on fallback-to-default. Add Rx
+               only if an AF will use it.
+     accept    Tgx.4 and a restart test that preserves rules
+     effort    1-3 weeks
+
+   GMLC
+     exists    a mock, 238 lines
+     build     a real MLP front end, a real SLg client, a real SLh
+               client or a documented refusal, a deferred-request store,
+               a privacy model with per-client classes, and a CDR writer
+     accept    TE2E.1, TE2E.3, TE2E.4
+     effort    6-10 weeks; this is the product
+
+   STP / DRA / firewall
+     exists    osmo-stp (no GT routing), Open5GS DRA (Cx only), a
+               228-line engine
+     build     section 7. Or operate the IPLOOK SRG you already licence
+               and put your own Diameter firewall in front of it
+     accept    TMAP.6, TMAP.7, and section 7.9
+     effort    see section 7
+
+ 6.4 PHASE 2
+
+   EIR
+     S13 ME-Identity-Check, 324/325. A whitelist of IMEIs plus a
+     blacklist feed. Roughly 2 weeks if S6a already works, because the
+     Diameter plumbing is shared.
+
+   SMSF
+     Nsmsf over SBI, SMS over NAS in the AMF, and a delivery link to the
+     SMSC. Roughly 3-4 weeks. The AMF must be configured to select the
+     SMSF before the first SMS is attempted.
+
+   SMSC
+     MAP SRI-SM out, MAP MT-ForwardSM in, and a store-and-forward queue.
+     Roughly 4-6 weeks. The MAP route table in sql/ already shows the
+     partner GTs this must work against.
+
+   Do not start phase 2 before TE2E.1 passes. An EIR that authenticates
+   nothing is worse than no EIR.
+
+
+7. THE DIAMETER FIREWALL AND SS7 SCREENING
+
+ 7.1 WHY IT IS A PRODUCT, NOT A CONFIG
+
+   Diameter has no authentication between peers beyond a shared transport
+   and a configured name. Anything that can reach port 3868 can send an
+   S6a Insert-Subscriber-Data, a Cancel-Location, or an SLg Provide-
+   Location. SS7 is weaker still. The firewall is what stands between the
+   interconnect and your subscriber data.
+
+   It belongs in the DRA position, in front of every peer, and it is the
+   thing you can sell to another operator.
+
+ 7.2 MESSAGE SCREENING
+
+   Allow-list, default deny, evaluated on the inbound request before any
+   routing decision:
+
+     - peer identity: Origin-Host and Origin-Realm must match a
+       configured peer; unknown peers get 3002 and an alarm;
+     - application and command pair must be in the allowed matrix for
+       that peer (a roaming partner may send SLg only if you sell it);
+     - for SLg, the target IMSI must match a home prefix; otherwise
+       drop and log with the prefix;
+     - for S6a, ULR from an MME that is not yours is dropped;
+     - no inbound request may target an NF that is not published to that
+       peer.
+
+ 7.3 AVP VALIDATION
+
+     - mandatory AVPs present, in the right order of occurrence;
+     - AVP length sane against the message length;
+     - no duplicate AVPs where the specification forbids them;
+     - enumerated values in range (a Requested-QoS with a bogus class
+       must be rejected, not clamped);
+     - string AVPs printable and within length limits;
+     - grouped AVPs validated recursively, to a bounded depth.
+
+   Malformed input gets a defined error, never a parser exception that
+   kills the process. Fuzz this on purpose.
+
+ 7.4 TOPOLOGY HIDING
+
+   Rewrite Origin-Host and Origin-Realm on egress to your signalling
+   identity. Never rewrite Session-Id, Hop-by-Hop or End-to-End Id. A
+   firewall that rewrites session identifiers breaks every answer path
+   and is very hard to diagnose.
+
+ 7.5 RATE, OVERLOAD AND DOIC
+
+     - per-peer request rate cap and a burst allowance;
+     - per-application cap, so a Gy storm cannot starve S6a;
+     - answer with 3004 (too busy) rather than dropping, so the peer
+       backs off;
+     - implement DOIC per RFC 7683: advertise OC-Supported-Features,
+       honour OC-OLR and OC-Validity-Duration, and shed in the order
+       your policy names;
+     - shed location requests first. They are the least revenue-critical
+       and the most privacy-sensitive.
+
+ 7.6 MALFORMED AND HOSTILE INPUT
+
+     - oversized messages rejected before allocation;
+     - AVP count and nesting bounded;
+     - unknown application ids answered 3007 or dropped with a counter;
+     - SCTP association storm limited per source;
+     - every rejection increments a labelled counter and writes an audit
+       record with the peer, the message and the rule.
+
+ 7.7 LOGGING AND RECORDING
+
+   One audit record per rejected message: timestamp, peer, application,
+   command, rule id, and a hash of the payload. One performance record
+   per interval: requests, answers, errors by code, latency percentiles.
+   These are what you show a regulator and a customer.
+
+ 7.8 CONFIGURATION SCHEMA
+
+   A versioned file, reloaded without restart, with the same evaluation
+   shape as the DRA so operators learn one model:
+
+     rules:
+       - id: slg-inbound-roaming
+         match: { application_id: 16777255 }
+         when:  { imsi_prefix_not: ["256724"] }
+         action: drop
+         log: audit
+       - id: s6a-from-home-mme
+         match: { application_id: 16777251, command: 316 }
+         when:  { origin_host_in: ["mme01", "mme02"] }
+         action: route
+         peer_set: hss
+
+   First match wins. Rule ids are stable and appear in the audit record.
+
+ 7.9 ACCEPTANCE TESTS
+
+     TFW.1  unknown peer                    dropped, 3002, alarm
+     TFW.2  disallowed command              dropped, counted
+     TFW.3  SLg from a foreign prefix       dropped, audit record
+     TFW.4  malformed AVP                   defined error, process alive
+     TFW.5  fuzz 10,000 random messages     no crash, no leak
+     TFW.6  rate above cap                 3004, peer backs off
+     TFW.7  OLR received                    shedding applied, restored
+     TFW.8  reload rules under load         no message loss
+     TFW.9  unknown GT at the STP           MAP error, not forwarded
+     TFW.10 disallowed opcode at the STP    rejected, counted
+
+
+8. KUBERNETES AND SERVER SETUP
+
+ 8.1 THE SCTP FACT FIRST
+
+   Kubernetes Services support SCTP, but that is not the hard part. The
+   hard part is that N2 (NGAP), N3 (GTP-U), Diameter and M3UA need a pod
+   to have a stable, routable IP on a specific VLAN, and to own an SCTP
+   association end to end.
+
+   Practical rule:
+
+     - signalling NFs (amf, dra, stp, mme, gmlc) get a Multus secondary
+       interface on the signalling VLAN, with hostNetwork off;
+     - the UPF gets SR-IOV virtual functions plus hugepages, and runs as
+       a DaemonSet on dedicated nodes;
+     - everything else uses ordinary ClusterIP services.
+
+   Do not put N2 behind a kube-proxy Service. NGAP association state does
+   not survive load balancing.
+
+ 8.2 CLUSTER LAYOUT AND SIZING
+
+   Staging, one node, for function only:
+
+     1 x 16 vCPU, 64 GB RAM, 1 TB NVMe, 2 x 10 GbE
+
+   Pre-production, three nodes:
+
+     control plane   3 x 4 vCPU / 8 GB  (k3s or kubeadm)
+     signalling      2 x 16 vCPU / 64 GB, SCTP, 10 GbE
+                     runs amf, smf, pcf, udm, hss, gmlc, dra, stp
+     user plane      1 x 32 vCPU / 64 GB, 25 GbE, SR-IOV,
+                     16 GB hugepages, NUMA aligned
+                     runs upf only
+
+   Separate the user plane. A noisy data plane evicting the AMF is a
+   signalling outage caused by a download.
+
+ 8.3 MULTUS AND SR-IOV
+
+     Multus with a macvlan NetworkAttachmentDefinition per VLAN is
+     enough for staging and for Diameter. SR-IOV is for the UPF only.
+
+     Staging definition:
+       apiVersion: k8s.cni.cncf.io/v1
+       kind: NetworkAttachmentDefinition
+       metadata: { name: signalling }
+       spec:
+         config: |
+           { "cniVersion": "0.3.1", "type": "macvlan",
+             "master": "eth1", "mode": "bridge",
+             "ipam": { "type": "whereabouts",
+                       "range": "10.1.13.0/24" } }
+
+     Annotate the pod with k8s.v1.cni.cncf.io/networks: signalling and
+     give it the address from section 4.2.
+
+   Install Multus, the SR-IOV device plugin and operator before any NF
+   pod. Retrofitting them after a working cluster is a rebuild.
+
+ 8.4 WORKLOADS
+
+     Deployment       amf, smf, pcf, udm, ausf, chf, nrf, hss, gmlc, dra
+     StatefulSet      mariadb, mongo, redis if self-hosted
+     DaemonSet        upf, node exporter, packet capture agent
+     Job / CronJob    DB migrations, CDR rollup, route table sync
+
+   Every NF gets a readiness probe that proves its dependency, not just
+   that its port is open: the AMF readiness should fail if it cannot
+   reach the NRF. A readiness probe that is a TCP connect is a lie.
+
+ 8.5 STORAGE
+
+   Subscriber and CDR data must survive a node loss and fsync. Use a
+   storage class that does not lie about durability. Local-path is fine
+   for staging and wrong for pre-production. For three nodes, Longhorn
+   or a replicated MariaDB plus object storage for CDRs is the cheaper
+   correct answer.
+
+ 8.6 NETWORK POLICY
+
+   Default deny between namespaces. Explicit allow:
+
+     amf  -> nrf, udm, ausf, pcf, lmf
+     smf  -> nrf, upf, udm, pcf, chf
+     gmlc -> dra, hss/udm, lmf
+     dra  -> every served peer, nothing else
+     hss  -> db only
+
+   The DRA policy is the interesting one. If the DRA can reach the
+   database, it will eventually be given a reason to read it.
+
+ 8.7 OBSERVABILITY
+
+     prometheus + grafana for NF metrics
+     a capture agent on the signalling VLAN, feeding CNA if licensed
+     node exporter and sctp metrics
+     alert on: association down, Diameter error rate, PFCP session
+     drop, CDR write failure, readiness flapping
+
+ 8.8 MIGRATION PATH
+
+     1  compose profiles correct and tests green (sections 3 and 5)
+     2  single-node k3s, same images, Multus, one NF moved: the DRA
+     3  DRA traffic stable for a week, then move the GMLC
+     4  AMF and SMF, then UPF on the user-plane node
+     5  freeze compose; it becomes the development environment only
+
+   Move one NF at a time and keep the ability to fall back for one
+   release. Big-bang migrations to Kubernetes are how pilots die.
+
+ 8.9 WHAT NOT TO DO
+
+     - do not run the UPF in a pod without SR-IOV or DPDK;
+     - do not share a node between the UPF and the AMF;
+     - do not use NodePort for Diameter or NGAP;
+     - do not store CDRs only in a container filesystem;
+     - do not let the DRA or the STP hold subscriber state.
+
+
+9. TERRAFORM AND THE LINUX BASELINE
+
+ 9.1 WHERE TERRAFORM FITS
+
+   Terraform provisions hosts and networks. It does not configure the
+   core. Keep the boundary sharp:
+
+     terraform   VLANs, subnets, VMs or bare-metal allocation, DNS,
+                 firewall, load balancers, object storage for CDRs
+     ansible     OS baseline, kernel, sysctl, hugepages, packages
+     gitops      Kubernetes manifests and NF configuration
+
+ 9.2 PROVIDER CHOICE
+
+     staging on a workstation or an on-prem box
+       libvirt or bpg/proxmox provider, cloud-init, one module per host
+     colo
+       whatever the facility offers; if it is bare metal, use a small
+       Terraform that only allocates and a full Ansible that configures
+     cloud
+       only for the signalling-light parts; the UPF wants a real NIC
+
+ 9.3 MODULE LAYOUT
+
+     terraform/
+       modules/network      VLANs, subnets, routes
+       modules/host         VM or bare metal, disks, NICs
+       modules/k8s          k3s or kubeadm bootstrap
+       modules/dns          realm and NF records
+       envs/staging         one node
+       envs/preprod         three nodes
+
+   Remote state with locking from the first commit. A state file on a
+   laptop is how two people build two different networks.
+
+ 9.4 SECRETS
+
+   Terraform variables are not secrets. Put credentials in SOPS or in a
+   secret manager and reference them. The .env.example defaults must
+   never reach a pre-production host.
+
+ 9.5 THE LINUX BASELINE (ANSIBLE)
+
+     OS            Ubuntu 22.04 LTS or Debian 12
+     kernel        5.15 or newer, for gtp5g and modern SCTP
+     packages      lksctp-tools, tcpdump, chrony, iperf3, tuned
+     time          chrony against at least two sources; every CDR and
+                   every authentication depends on it
+     tuned         throughput profile on the UPF node
+
+ 9.6 SYSCTL AND KERNEL, EXPLICITLY
+
+     net.ipv4.ip_forward = 1
+     net.ipv6.conf.all.forwarding = 1
+     net.core.rmem_max = 33554432
+     net.core.wmem_max = 33554432
+     net.core.netdev_max_backlog = 250000
+     net.sctp.rmem_max = 33554432
+     net.sctp.wmem_max = 33554432
+     net.sctp.association_max_retrans = 10
+     net.sctp.path_max_retrans = 5
+     net.sctp.hb_interval = 30000
+     net.sctp.valid_cookie_life = 60000
+     fs.file-max = 2097152
+     vm.nr_hugepages = 8192        (2 MB pages, UPF node only)
+     kernel.numa_balancing = 0     (UPF node)
+
+   SCTP parameters are not defaults you can leave. An interconnect that
+   retransmits too eagerly looks like a peer problem and is not.
+
+ 9.7 HOST FIREWALL
+
+   nftables, default drop, allow:
+
+     22/tcp        from the management network only
+     Diameter      from configured peer addresses only
+     M3UA          from the MTN interconnect addresses only
+     GTP-U         from the RAN and the peer UPF only
+     NGAP          from the gNB addresses only
+
+   Everything else closed. In a telecom core the firewall is not a
+   hygiene measure; it is part of the product.
+
+ 9.8 THE BUILD SEQUENCE
+
+     1  terraform apply, staging
+     2  ansible baseline, reboot, verify sysctl and SCTP
+     3  k3s, Multus, whereabouts, MetalLB
+     4  namespaces and network policies
+     5  databases, migrations
+     6  NRF, then the NFs in dependency order
+     7  DRA and STP, with the firewall rules from section 7
+     8  run section 5 from a test runner in the cluster
+
+   Each step has a check. A step without a check is a hope.
+
+
+10. STAGING TO PRE-PRODUCTION GATE
+
+   Both must be true to promote a build:
+
+   TECHNICAL
+     - every test in section 5.15 passes on a clean deployment
+     - every P0 in section 3 is closed and has a regression test
+     - no service depends on a mock in the promoted profile
+     - a restart of any single NF loses no CDR and no session record
+     - the firewall rejects TFW.1 to TFW.10
+
+   OPERATIONAL
+     - one command deploys from clean; one command rolls back
+     - config is in git; secrets are not
+     - dashboards exist for the eight alerts in 8.7
+     - a named person owns each NF and its runbook
+
+   If either list has a gap, the correct action is to name the gap, not
+   to schedule around it.
+
+
+11. PHASE PLAN
+
+   WEEK 1        P0 corrections (section 3). Port register, mock removal,
+                 fail-closed auth, profile split, bootstrap fix
+   WEEK 2        Staging topology, transport and Diameter tests (5.1-5.8)
+   WEEK 3-4      One end-to-end path, even if narrow: real GMLC to real
+                 HSS to a real answer
+   WEEK 4-8      GMLC real implementation; DRA app-ids; Diameter firewall
+   WEEK 5-8      SMF charging and CDR; UPF integration; PCF fixes
+   WEEK 6-10     UDM SUCI A/B, SLh, Nudm dataset plumbing
+   WEEK 8-14     AMF proof and wiring; LMF build
+   WEEK 10-16    MME SLg integration if it exists; MSC helper fixes
+   WEEK 10-16    Kubernetes migration, one NF at a time
+
+   PHASE 2       EIR, then SMSF, then SMSC, only after TE2E.1 passes
+
+   Two engineers can compress this to roughly two thirds. One engineer
+   cannot compress it at all; the dependencies are serial.
+
+
+12. OPEN QUESTIONS
+
+   Q1  Which core is authoritative: Free5GC images or the custom
+       services? This changes the whole plan.
+   Q2  Is the IPLOOK SRG the production STP, with osmo-stp only for
+       development? If yes, the DRA engine here is a test double.
+   Q3  Does the MME you intend to use answer SLg? Two days to find out.
+   Q4  Is there an LMF anywhere in the estate (PaiCore, IPLOOK)? If yes,
+       integrate rather than build.
+   Q5  Which PLMN is allocated for production? Three values are in use.
+   Q6  Who owns the LCS privacy model and its per-client classes?
+   Q7  Is IMS in phase 1? It decides whether the Cx tests matter now.
+   Q8  Which environment will face the MTN interconnect first, and who
+       signs the change?
+
+
+================================================================================
+13. BUILD LOG — 2026-11-19 (custom core pass 1)
+================================================================================
+
+Q1 in section 12 is now answered by the tree itself: the custom services are
+the product, and the Free5GC images are a reference profile that is never
+started beside them. Q5 remains open; 641/020 is the default in .env.example
+because it matches the DRA realm in the vendor capture (mnc020.mcc641).
+
+13.1 WHAT CHANGED
+
+   docker-compose.yml          rewritten. 30 services, two profiles.
+                               Free5GC NFs are gated behind profile
+                               "free5gc" and re-published on 18xxx so a
+                               future custom AMF can take 38412. Every
+                               custom service now has an explicit health
+                               check, a restart policy and its config
+                               directory mounted.
+
+   nrf/                        NEW custom NRF (TS 29.510 subset):
+                               register, merge-patch heartbeat,
+                               de-register, read, list, discovery and
+                               subscription storage. Redis-backed with an
+                               in-process fallback; Redis TTL is
+                               heartbeatTimer x 4, so dead NFs expire
+                               without a sweeper.
+
+   scripts/check_stack.py      NEW static contract checker: host-port
+                               collisions per protocol, profile isolation,
+                               config-mount coverage, and source rules
+                               (no mock location, no fabricated vectors).
+
+   scripts/bootstrap.sh        rewritten. Sources .env under "set -u",
+                               runs the contract checker, starts the data
+                               layer, waits on real health states, then
+                               starts the application layer. --reference
+                               starts the Free5GC profile instead.
+
+   .env.example                regrouped and completed; every compose
+                               variable is documented.
+
+   gmlc/src/gmlc_server.py     synthesised position deleted. Requests are
+                               stored in Redis (memory fallback) with a
+                               TTL, so status polling returns the real
+                               outcome or 404. Deferred/periodic no
+                               longer claim to be queued. Privacy override
+                               is only honoured when the config enables it
+                               for the client type. MAP PSL is rejected
+                               explicitly instead of "accepted".
+
+   udm/src/udm_server.py       Process refuses to start without
+                               pycryptodome. derive_opc no longer falls
+                               back to SHA-256. The hash-based vector
+                               fallback is gone. EAP-AKA' now returns 501
+                               instead of zero-filled vectors. A
+                               subscriber with no credentials gets 400.
+                               /health reports real crypto only.
+
+   dra/config/dra.json         AppIDs extended with SLg 16777255, SLh
+                               16777291 and Gy 4. Peers corrected to the
+                               real stack (diameter-s6a-cx, custom-pcf,
+                               ocs, osmo-stp) and a disabled gmlc peer
+                               pair added for SLg/SLh. Routes renamed to
+                               application-based names and IMSI filters
+                               blanked (empty string), so each
+                               deployment sets its own prefix instead
+                               of inheriting a guess.
+
+   tests/                      test_stack_contract.py (8 tests, no Docker)
+                               and test_gmlc_service.py (8 tests, in
+                               process). Both pass.
+
+13.2 HOW TO VERIFY ON A BUILD HOST
+
+   python scripts/check_stack.py
+   python tests/test_stack_contract.py
+   python tests/test_gmlc_service.py
+   ./scripts/bootstrap.sh
+   curl -sf http://localhost:8000/health      # nrf
+   curl -sf http://localhost:8007/health      # udm
+   curl -sf http://localhost:8082/health      # gmlc
+
+   Expected GMLC answer to any immediate request until SLg/SLh/MAP is
+   configured: status=failed, error_code=NO_LCS_SOURCE.
+
+13.3 STILL OPEN (unchanged by this pass)
+
+   - No Docker engine on the authoring host, so images were not built and
+     containers were not started. The compose file is validated
+     statically only; the first "up" on a build host is the real test.
+   - SUCI protection schemes 1 and 2 still return None (ECIES not built).
+     Any commercial SIM uses Profile A or B, so 5G attach still fails.
+   - No custom AMF, no LMF, no MME. Namf_Location therefore does not exist
+     in the custom stack.
+   - SLg/SLh listeners: the GMLC still exposes HTTP shims only. The DRA
+     LCS peer is disabled until that changes.
+   - Custom UPF is still a packet sink. PFCP and GTP-U are logged, not
+     processed.
+   - SMF charging pipeline is still absent; the OCS exists but nothing
+     calls it.
+   - Free5GC NFs still have no config mounts. That is deliberate for a
+     reference profile, but it means the profile is not a conformance
+     fixture either.
+   - Tests require Python with fastapi, pydantic, httpx and PyYAML on the
+     host; add a CI job to run them on every commit.
+
+================================================================================
+14. NODE BUILD PASS: SUCI, CORE LIBRARY, AMF, LMF, MME
+================================================================================
+
+14.1 SUCI DE-CONCEALMENT (TS 33.501 ANNEX C)
+
+   New file: udm/src/suci.py. Wired into udm_server.py through
+   resolve_identity() and deconceal_suci().
+
+   Scheme 0 (null)      MSIN returned as decimal digits.
+   Scheme 1 (Profile A) ECIES over X25519.
+   Scheme 2 (Profile B) ECIES over secp256r1 (SEC1 compressed or
+                        uncompressed point accepted).
+
+   Construction, identical for both profiles:
+     Z          = ECDH(home network private key, UE ephemeral public key)
+     K          = ANSI X9.63 KDF (SHA-256, counter 1..n, SharedInfo = the
+                  UE public key as transmitted; Profile B always uses the
+                  compressed form)
+     enc_key    = K[0:16], ICB = K[16:32], mac_key = K[32:64]
+     MAC        = HMAC-SHA-256(ciphertext, mac_key)[0:8]
+     plaintext  = AES-128-CTR(enc_key, ICB, ciphertext)
+     MSIN       = nibble-swapped BCD, trailing 0xF removed
+
+   Scheme output layout: PK_UE || ciphertext || MAC(8), where PK_UE is
+   32 octets for Profile A and 33 or 65 octets for Profile B.
+
+   Key custody:
+     SUCI_PROFILES                JSON array, highest precedence
+     SUCI_PROFILE_A_PRIVATE_KEY   32 hex octets
+     SUCI_PROFILE_A_PKID          key id used in the SUCI (default 1)
+     SUCI_PROFILE_B_PRIVATE_KEY   same for Profile B
+     SUCI_PROFILE_B_PKID          default 2
+
+   Keys are read from the environment, never from the repository, and
+   /health exposes only pkid, scheme and the derived public key.
+
+   Failure causes, each with its own HTTP status and cause string:
+     SUCI_MALFORMED                 400  bad syntax or non-hex output
+     SUCI_UNSUPPORTED               400  NAI SUCI, or pkid and scheme mismatch
+     SUCI_AUTHENTICATION_FAILED     400  MAC mismatch, bad point, unknown pkid
+     SUCI_KEY_NOT_CONFIGURED        500  no key provisioned; never guesses
+
+   The UDM image now installs cryptography==41.0.7. pycryptodome remains
+   for Milenage; the two libraries serve different purposes.
+
+   tests/test_suci.py (13 tests) covers A and B round trips, MAC
+   tampering, wrong key, unknown pkid, scheme mismatch, null scheme,
+   malformed input, environment loading and the health summary.
+
+14.2 CORE LIBRARY (corelib/)
+
+   corelib/diameter.py      RFC 6733 header and AVP codec with correct
+                            V (0x80) and M (0x40) bits, 4-octet padding,
+                            grouped AVPs, an asyncio TCP server, and
+                            answer() that always names this node as
+                            Origin-Host instead of echoing the peer.
+                            Constants for SLg (16777255, 8388620), SLh
+                            (16777291, 8388622), S6a, Gx and Gy.
+   corelib/nrf_client.py    TS 29.510 register, heartbeat, deregister and
+                            discovery on a daemon thread with backoff.
+                            Failures never stop the NF; they surface in
+                            /health.
+   corelib/http.py          JSON over urllib, so the new nodes need no
+                            third-party HTTP client.
+
+   diameter/src/diameter_server.py predates corelib and still has its own
+   codec, in which the V and M bits are swapped. The new nodes do not use
+   it. Migrating S6a to corelib is the next cleanup item.
+
+14.3 CUSTOM AMF (amf/, host port 8001)
+
+   Registers with the NRF as NF type AMF (services namf-loc, namf-comm)
+   and forwards:
+
+     POST /namf-loc/v1/{supi}/provide-loc-info
+       discovers an LMF through the NRF (cached 10 s), posts to
+       /nlmf-loc/v1/determine-location and relays the result.
+       503 LMF_NOT_REGISTERED when discovery finds nothing,
+       504 LMF_UNREACHABLE when the endpoint does not answer.
+
+     POST /namf-loc/v1/{supi}/event-notify      501
+     POST /namf-loc/v1/{supi}/cancel-pos-info   501
+     POST /namf-comm/v1/ue-contexts/...         501
+       Deferred location and NAS transfer need NGAP and NAS, which are
+       not built. The causes say so.
+
+     GET /n2/status     listening=false, reason NGAP not implemented
+     GET /health        n2_ngap not implemented, ue_attach false
+
+   This AMF cannot attach a UE. It is the service-based hop between the
+   location layer and the SBI, and it is honest about the gap.
+
+14.4 CUSTOM LMF (lmf/, host port 8003)
+
+   Registers as NF type LMF (service nlmf-loc).
+
+     POST /nlmf-loc/v1/determine-location
+       With LMF_PROVIDER_URL empty: 501 NO_POSITIONING_SOURCE.
+       With a provider: forwards the request, checks that latitude and
+       longitude are numbers inside their ranges, and returns a POINT
+       geographicArea. Provider failures map to 504 PROVIDER_UNREACHABLE,
+       502 PROVIDER_ERROR or 502 PROVIDER_INVALID_RESPONSE.
+
+     POST /nlmf-loc/v1/location-context-transfer      501
+     POST /nlmf-loc/v1/upiuci/{supi}/cancel-location  501
+
+   The LMF never generates a position. A provider that returns simulated
+   coordinates is an operator decision and is visible in the response's
+   provider field.
+
+14.5 MME (mme/, Diameter 3875/tcp, HTTP 8075)
+
+   One process, two listeners in the same asyncio loop:
+
+     Diameter SLg    CER/CEA and DWR/DWA answered with success.
+                     PLR -> PLA with Result-Code 5012
+                     DIAMETER_UNABLE_TO_COMPLY and an Error-Message naming
+                     the missing S1-MME association.
+                     PLR for a foreign Destination-Realm -> 3003.
+                     Unknown command -> 3001.
+     HTTP            /health, /slg/status, /scope and /slg/plr (a JSON shim
+                     that runs the same decision path for tests).
+
+   Not built: S1AP, S11, S6a, SGs, paging, bearers. A UE cannot attach to
+   this MME. It exists so that a GMLC or an external MME peer gets a
+   protocol-correct failure instead of a hang.
+
+   MSC: deliberately not built. An MSC needs MAP LCS (SLR/SLA, opcodes
+   85/86) over SCCP plus call control. A stub that answers MAP without a
+   visitor location register would be worse than nothing. The DRA/STP
+   layer already carries the SS7 transport for when that work starts.
+
+14.6 PORTS ADDED IN THIS PASS
+
+   8001  custom-amf http          8003  custom-lmf http
+   3875  custom-mme SLg tcp       8075  custom-mme http
+
+   NGAP 38412 is deliberately not published: nothing listens on it. The
+   free5GC profile keeps 38413 -> 38412 so a future NGAP listener can take
+   38412 on the custom side without a collision.
+
+   scripts/check_stack.py now also rejects random-number positioning in
+   amf, lmf and mme, and a hard-coded SUCI private key.
+
+   tests/test_nodes.py (11 tests) drives the three services with FastAPI's
+   TestClient and opens a real TCP connection to the MME SLg listener:
+   CER -> CEA 2001, PLR -> PLA 5012, foreign realm -> 3003.
+
+14.7 VERIFY
+
+   python scripts/check_stack.py
+   python tests/test_suci.py
+   python tests/test_nodes.py
+   python -m unittest discover -s tests          # 44 tests
+
+   Live, once containers run:
+     curl -s localhost:8003/health                # provider none
+     curl -s -X POST localhost:8003/nlmf-loc/v1/determine-location \
+          -H 'content-type: application/json' \
+          -d '{"supi":"imsi-641020123456789"}'
+     # expected 501, detail.cause = NO_POSITIONING_SOURCE
+     curl -s localhost:8001/health                # n2_ngap not implemented
+     curl -s localhost:8075/scope                 # SLg only
+
+14.8 STILL OPEN AFTER THIS PASS
+
+   - No Docker engine on the authoring host: images were not built and
+     containers were not started. Everything above is validated by import,
+     in-process HTTP tests and one real TCP Diameter exchange on the host.
+     The first compose build is still the real test.
+   - AMF has no NGAP, so no UE can attach through the custom stack yet.
+     Commercial 5G attach needs N2 (SCTP plus ASN.1 NGAP), NAS security
+     and UE context management.
+   - LMF has no measurement provider: positioning needs an E-SMLC-grade
+     source (OTDOA, Multi-RTT, or an external LCS platform).
+   - SLh (RIR/RIA) is still an HTTP shim on the GMLC; no Diameter listener.
+   - diameter/src/diameter_server.py still carries the older codec.
+   - MSC and MAP LCS are not started.
+
+================================================================================
+ END OF DOCUMENT
+================================================================================

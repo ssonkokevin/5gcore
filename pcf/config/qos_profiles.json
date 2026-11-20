@@ -1,0 +1,96 @@
+{
+  "qosDecs": {
+    "default-qos": {
+      "qosId": "default-qos",
+      "5qi": 9,
+      "maxbrUl": "1000000000",
+      "maxbrDl": "1000000000",
+      "arp": {
+        "priorityLevel": 8,
+        "preemptCap": "NOT_PREEMPT",
+        "preemptVuln": "PREEMPTABLE"
+      },
+      "priorityLevel": 50,
+      "averWindow": 2000,
+      "maxDataBurstVol": 1000,
+      "qnc": false,
+      "reflectiveQos": false,
+      "sharingKeyDl": "0",
+      "sharingKeyUl": "0"
+    },
+    "ims-qos": {
+      "qosId": "ims-qos",
+      "5qi": 5,
+      "maxbrUl": "384000",
+      "maxbrDl": "384000",
+      "gbrUl": "32000",
+      "gbrDl": "32000",
+      "arp": {
+        "priorityLevel": 15,
+        "preemptCap": "MAY_PREEMPT",
+        "preemptVuln": "NOT_PREEMPTABLE"
+      },
+      "priorityLevel": 20,
+      "averWindow": 2000,
+      "maxDataBurstVol": 1000,
+      "qnc": true,
+      "reflectiveQos": false,
+      "sharingKeyDl": "0",
+      "sharingKeyUl": "0"
+    },
+    "video-qos": {
+      "qosId": "video-qos",
+      "5qi": 6,
+      "maxbrUl": "50000000",
+      "maxbrDl": "200000000",
+      "arp": {
+        "priorityLevel": 7,
+        "preemptCap": "NOT_PREEMPT",
+        "preemptVuln": "PREEMPTABLE"
+      },
+      "priorityLevel": 60,
+      "averWindow": 2000,
+      "maxDataBurstVol": 10000,
+      "qnc": false,
+      "reflectiveQos": false,
+      "sharingKeyDl": "0",
+      "sharingKeyUl": "0"
+    },
+    "social-qos": {
+      "qosId": "social-qos",
+      "5qi": 9,
+      "maxbrUl": "10000000",
+      "maxbrDl": "50000000",
+      "arp": {
+        "priorityLevel": 9,
+        "preemptCap": "NOT_PREEMPT",
+        "preemptVuln": "PREEMPTABLE"
+      },
+      "priorityLevel": 70,
+      "averWindow": 2000,
+      "maxDataBurstVol": 5000,
+      "qnc": false,
+      "reflectiveQos": false,
+      "sharingKeyDl": "0",
+      "sharingKeyUl": "0"
+    },
+    "gaming-qos": {
+      "qosId": "gaming-qos",
+      "5qi": 80,
+      "maxbrUl": "50000000",
+      "maxbrDl": "100000000",
+      "arp": {
+        "priorityLevel": 6,
+        "preemptCap": "NOT_PREEMPT",
+        "preemptVuln": "PREEMPTABLE"
+      },
+      "priorityLevel": 40,
+      "averWindow": 2000,
+      "maxDataBurstVol": 1000,
+      "qnc": false,
+      "reflectiveQos": false,
+      "sharingKeyDl": "0",
+      "sharingKeyUl": "0"
+    }
+  }
+}

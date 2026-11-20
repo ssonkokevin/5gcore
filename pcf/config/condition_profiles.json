@@ -1,0 +1,60 @@
+{
+  "conds": {
+    "time-night": {
+      "condId": "time-night",
+      "activationTime": "2024-01-01T22:00:00Z",
+      "deactivationTime": "2024-01-01T06:00:00Z",
+      "accessType": [],
+      "ratType": [],
+      "servingNfIdentity": null
+    },
+    "time-day": {
+      "condId": "time-day",
+      "activationTime": "2024-01-01T06:00:00Z",
+      "deactivationTime": "2024-01-01T22:00:00Z",
+      "accessType": [],
+      "ratType": [],
+      "servingNfIdentity": null
+    },
+    "rat-5g-only": {
+      "condId": "rat-5g-only",
+      "activationTime": null,
+      "deactivationTime": null,
+      "accessType": ["3GPP_ACCESS"],
+      "ratType": ["NR"],
+      "servingNfIdentity": null
+    },
+    "rat-4g-only": {
+      "condId": "rat-4g-only",
+      "activationTime": null,
+      "deactivationTime": null,
+      "accessType": ["3GPP_ACCESS"],
+      "ratType": ["EUTRA"],
+      "servingNfIdentity": null
+    },
+    "access-wifi": {
+      "condId": "access-wifi",
+      "activationTime": null,
+      "deactivationTime": null,
+      "accessType": ["NON_3GPP_ACCESS"],
+      "ratType": ["WLAN"],
+      "servingNfIdentity": null
+    },
+    "plmn-home": {
+      "condId": "plmn-home",
+      "activationTime": null,
+      "deactivationTime": null,
+      "accessType": [],
+      "ratType": [],
+      "servingNfIdentity": "64108"
+    },
+    "plmn-visited": {
+      "condId": "plmn-visited",
+      "activationTime": null,
+      "deactivationTime": null,
+      "accessType": [],
+      "ratType": [],
+      "servingNfIdentity": "!64108"
+    }
+  }
+}

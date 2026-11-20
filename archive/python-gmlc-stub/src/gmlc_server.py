@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
-"""
-GMLC (Gateway Mobile Location Center) Server
-5G Core Engine - Pilot Implementation
-Aligned with PaiCore GMLC Documentation (3GPP TS 23.271, 29.171, 29.172)
-Supports LCS (Location Services): SLh, SLg, LCS-AP, MAP/CAMEL
+"""GMLC — Gateway Mobile Location Centre.
+
+Business, privacy, routing and record layer for LCS. This process never
+measures a position; measurements belong to E-SMLC/LMF. Until a real
+leakage source (SLg, SLh or MAP) is configured, every request is answered
+with an explicit failure — never with a synthesised position.
 """
 
 import asyncio
+import json
 import logging
 import os
 import signal
-import sys
+import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Optional
 
 import yaml
@@ -19,24 +22,31 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
 logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("gmlc")
+
+REQUEST_TTL_SECONDS = int(os.getenv("GMLC_REQUEST_TTL", "3600"))
+REDIS_KEY_PREFIX = os.getenv("GMLC_REQUEST_PREFIX", "gmlc:req:")
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
 class GMLCConfig:
     def __init__(self, config_path: str = "/app/config/gmlc.yaml"):
         with open(config_path, "r") as f:
-            self.config = yaml.safe_load(f)
-        
+            self.config = yaml.safe_load(f) or {}
+
         gmlc_cfg = self.config.get("gmlc", {})
         self.host = gmlc_cfg.get("host", "0.0.0.0")
         self.port = gmlc_cfg.get("port", 8082)
         self.realm = gmlc_cfg.get("realm", "core.local")
         self.origin_host = gmlc_cfg.get("origin_host", "gmlc.core.local")
         self.origin_realm = gmlc_cfg.get("origin_realm", "core.local")
-        
+
         self.db_config = self.config.get("database", {})
         self.redis_config = self.config.get("redis", {})
         self.map_config = self.config.get("map", {})
@@ -45,6 +55,58 @@ class GMLCConfig:
         self.interfaces = self.config.get("interfaces", {})
         self.privacy = self.config.get("privacy", {})
         self.external_gmlc = self.config.get("external_gmlc", {})
+
+
+class RequestStore:
+    """Request state, Redis-backed so status polling survives a restart."""
+
+    def __init__(self, redis_config: dict):
+        self._redis = None
+        self._memory = {}
+        import socket
+
+        host = redis_config.get("host", "redis")
+        port = int(redis_config.get("port", 6379))
+        try:
+            socket.create_connection((host, port), timeout=0.5).close()
+        except OSError as exc:
+            logger.warning("Request store: memory (redis unreachable: %s)", exc)
+            return
+        try:
+            import redis as redis_lib
+
+            client = redis_lib.Redis(
+                host=host,
+                port=port,
+                password=redis_config.get("password") or os.getenv("REDIS_PASSWORD"),
+                socket_connect_timeout=0.5,
+                socket_timeout=2,
+                retry_on_timeout=False,
+                decode_responses=True,
+            )
+            client.ping()
+            self._redis = client
+            logger.info("Request store: redis")
+        except Exception as exc:
+            logger.warning("Request store: memory (redis unavailable: %s)", exc)
+
+    @property
+    def backend(self) -> str:
+        return "redis" if self._redis else "memory"
+
+    def put(self, request_id: str, record: dict) -> None:
+        payload = json.dumps(record)
+        if self._redis:
+            self._redis.setex(REDIS_KEY_PREFIX + request_id, REQUEST_TTL_SECONDS, payload)
+        else:
+            self._memory[request_id] = payload
+
+    def get(self, request_id: str) -> Optional[dict]:
+        if self._redis:
+            raw = self._redis.get(REDIS_KEY_PREFIX + request_id)
+        else:
+            raw = self._memory.get(request_id)
+        return json.loads(raw) if raw else None
 
 
 class LocationRequest(BaseModel):
@@ -69,13 +131,21 @@ class LocationResponse(BaseModel):
     error_message: Optional[str] = None
 
 
+class Denial:
+    __slots__ = ("code", "message")
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.message = message
+
+
 class GMLCServer:
     def __init__(self, config: GMLCConfig):
         self.config = config
-        self.app = FastAPI(title="5G Core GMLC", version="1.0.0")
+        self.app = FastAPI(title="Hamiltel GMLC", version="1.0.0")
+        self.store = RequestStore(config.redis_config)
         self._setup_routes()
         self._running = False
-        self._request_counter = 0
 
     def _setup_routes(self):
         @self.app.get("/health")
@@ -84,7 +154,8 @@ class GMLCServer:
                 "status": "healthy",
                 "service": "gmlc",
                 "version": "1.0.0",
-                "interfaces": self.config.interfaces
+                "interfaces": self.config.interfaces,
+                "request_store": self.store.backend,
             }
 
         @self.app.post("/lcs/location-request", response_model=LocationResponse)
@@ -107,97 +178,121 @@ class GMLCServer:
         async def diameter_slg(request: Request):
             return await self._handle_diameter_slg(await request.json())
 
+    def _privacy_decision(self, req: LocationRequest) -> Optional[Denial]:
+        privacy = self.config.privacy
+        if not privacy.get("check_privacy", True):
+            return None
+        if req.privacy_override:
+            if privacy.get("override_privacy_emergency", False) and req.lcs_client_type == "emergency_services":
+                return None
+            return Denial(
+                "PRIVACY_OVERRIDE_REJECTED",
+                "Privacy override not permitted for this client type",
+            )
+        if privacy.get("default_privacy_class") != "location_allowed":
+            return Denial(
+                "PRIVACY_VIOLATION",
+                "Location request not authorized by privacy policy",
+            )
+        return None
+
     async def _handle_location_request(self, req: LocationRequest) -> LocationResponse:
-        self._request_counter += 1
-        request_id = f"lcs-{self._request_counter:06d}"
-        
-        logger.info(f"Location request {request_id}: MSISDN={req.msisdn}, Type={req.request_type}")
-        
-        if self.config.privacy.get("check_privacy", True) and not req.privacy_override:
-            if self.config.privacy.get("default_privacy_class") != "location_allowed":
-                return LocationResponse(
+        request_id = f"lcs-{uuid.uuid4().hex[:12]}"
+        logger.info("Location request %s: MSISDN=%s type=%s", request_id, req.msisdn, req.request_type)
+
+        denial = self._privacy_decision(req)
+        if denial:
+            return self._finalise(
+                LocationResponse(
                     request_id=request_id,
                     status="not_authorized",
-                    error_code="PRIVACY_VIOLATION",
-                    error_message="Location request not authorized by privacy policy"
+                    timestamp=_now_iso(),
+                    error_code=denial.code,
+                    error_message=denial.message,
                 )
+            )
 
         if req.request_type == "immediate":
-            lat, lon, alt = self._simulate_location_lookup(req.msisdn, req.imsi)
-            return LocationResponse(
-                request_id=request_id,
-                status="success",
-                latitude=lat,
-                longitude=lon,
-                altitude=alt,
-                accuracy=req.accuracy or self.config.lcs_config.get("horizontal_accuracy", 50),
-                timestamp=asyncio.get_event_loop().time()
-            )
-        else:
-            return LocationResponse(
-                request_id=request_id,
-                status="pending",
-                error_code="DEFERRED_REQUEST",
-                error_message="Deferred/periodic request queued for processing"
+            return self._finalise(
+                LocationResponse(
+                    request_id=request_id,
+                    status="failed",
+                    timestamp=_now_iso(),
+                    error_code="NO_LCS_SOURCE",
+                    error_message=(
+                        "No LCS source configured. SLg, SLh and MAP are disabled in "
+                        "gmlc.yaml; configure a serving node before enabling LCS."
+                    ),
+                )
             )
 
-    async def _get_location_status(self, request_id: str) -> LocationResponse:
-        return LocationResponse(
-            request_id=request_id,
-            status="pending",
-            error_code="NOT_IMPLEMENTED",
-            error_message="Status polling not yet implemented"
+        return self._finalise(
+            LocationResponse(
+                request_id=request_id,
+                status="failed",
+                timestamp=_now_iso(),
+                error_code="NO_LCS_SOURCE",
+                error_message=(
+                    "Deferred/periodic requests need an E-SMLC or LMF to schedule; "
+                    "none is configured, so the request was not queued."
+                ),
+            )
         )
 
+    def _finalise(self, response: LocationResponse) -> LocationResponse:
+        self.store.put(response.request_id, response.model_dump())
+        return response
+
+    async def _get_location_status(self, request_id: str) -> LocationResponse:
+        record = self.store.get(request_id)
+        if record is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "status": 404,
+                    "cause": "REQUEST_NOT_FOUND",
+                    "detail": f"No location request {request_id} in the last {REQUEST_TTL_SECONDS}s",
+                },
+            )
+        return LocationResponse(**record)
+
     async def _handle_map_psl(self, payload: dict) -> dict:
-        logger.info(f"MAP PSL received: {payload}")
-        return {"status": "accepted", "message": "MAP PSL processed"}
+        logger.warning("MAP PSL received but the MAP stack is not configured: %s", payload)
+        return {
+            "status": "rejected",
+            "error_code": "MAP_STACK_NOT_CONFIGURED",
+            "error_message": "Provide-subscriber-location requires an STP-connected MAP stack; none is configured",
+        }
 
     async def _handle_diameter_slh(self, payload: dict) -> dict:
-        logger.info(f"Diameter SLh (LIR) received: {payload}")
-        msisdn = payload.get("msisdn", "")
-        lat, lon, alt = self._simulate_location_lookup(msisdn, None)
+        logger.warning("SLh RIR received on the HTTP shim; no SCTP listener is configured")
         return {
-            "command_code": 302,
-            "result_code": 2001,
+            "transport": "http-shim",
+            "command_code": 8388622,
+            "result_code": 5010,
             "session_id": payload.get("session_id", ""),
-            "location_info": {
-                "latitude": lat,
-                "longitude": lon,
-                "altitude": alt,
-                "accuracy": self.config.lcs_config.get("horizontal_accuracy", 50)
-            }
+            "error_message": "SLh not implemented — no RIR/RIA server available",
         }
 
     async def _handle_diameter_slg(self, payload: dict) -> dict:
-        logger.info(f"Diameter SLg (SLR) received: {payload}")
+        logger.warning("SLg PLR received on the HTTP shim; no SCTP listener is configured")
         return {
-            "command_code": 303,
-            "result_code": 2001,
+            "transport": "http-shim",
+            "command_code": 8388620,
+            "result_code": 5010,
             "session_id": payload.get("session_id", ""),
-            "location_estimate": {
-                "latitude": 0.0,
-                "longitude": 0.0,
-                "accuracy": self.config.lcs_config.get("horizontal_accuracy", 50)
-            }
+            "error_message": "SLg not implemented — no PLR/PLA server available",
         }
-
-    def _simulate_location_lookup(self, msisdn: str, imsi: Optional[str]) -> tuple:
-        import hashlib
-        hash_val = int(hashlib.md5(msisdn.encode()).hexdigest()[:8], 16)
-        lat = 37.7749 + (hash_val % 1000) / 10000.0
-        lon = -122.4194 + ((hash_val >> 10) % 1000) / 10000.0
-        alt = 10.0 + (hash_val % 100)
-        return round(lat, 6), round(lon, 6), round(alt, 1)
 
     async def start(self):
         self._running = True
         import uvicorn
+
         config = uvicorn.Config(
             self.app,
             host=self.config.host,
             port=self.config.port,
-            log_level="info"
+            log_level="info",
         )
         server = uvicorn.Server(config)
         await server.serve()
@@ -217,16 +312,16 @@ async def lifespan(app: FastAPI):
 async def main():
     config_path = os.getenv("GMLC_CONFIG", "/app/config/gmlc.yaml")
     config = GMLCConfig(config_path)
-    
+
     server = GMLCServer(config)
-    
+
     def signal_handler(sig, frame):
-        logger.info(f"Received signal {sig}, shutting down...")
+        logger.info("Received signal %s, shutting down...", sig)
         asyncio.create_task(server.stop())
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     try:
         await server.start()
     except KeyboardInterrupt:
