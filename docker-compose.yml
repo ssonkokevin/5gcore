@@ -652,41 +652,10 @@ services:
       - core-net
 
   # ========================================================================
-  # GMLC (Location Services)
+  # GMLC: not part of this repo.
+  # The gateway is a separate Java/Spring service (github.com/ssonkokevin/gmlc)
+  # and reaches the MME/AMF over standard protocols only. See docs/location/.
   # ========================================================================
-  gmlc:
-    build:
-      context: .
-      dockerfile: docker/gmlc/Dockerfile
-    container_name: core-gmlc
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    environment:
-      - GMLC_HOST=0.0.0.0
-      - GMLC_PORT=${GMLC_PORT:-8082}
-      - GMLC_REALM=${GMLC_REALM:-core.local}
-      - GMLC_ORIGIN_HOST=${GMLC_ORIGIN_HOST:-gmlc.core.local}
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_NAME=${DB_NAME}
-      - REDIS_HOST=${REDIS_HOST}
-      - REDIS_PORT=${REDIS_PORT}
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - LOG_LEVEL=${LOG_LEVEL:-info}
-    volumes:
-      - ./gmlc/config:/app/config:ro
-      - ./gmlc/src:/app/src
-    ports:
-      - "8082:8082/tcp"
-    command: ["python", "/app/src/gmlc_server.py"]
-    networks:
-      - core-net
 
   # ========================================================================
   # OAM / Observability

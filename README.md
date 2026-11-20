@@ -1,61 +1,76 @@
 # 5G Core Engine
 
-Open-source 5G SA core architecture template with STP/DRA/SCP/UDM, PCF/SMF/UPF build scaffolds, and PaiCore-aligned LBS/GMLC pilot documentation.
+Hamiltel in-house core: SS7/Diameter planes, tri-mode UDM/HSS/HLR, PCF/SMF/UPF
+scaffolds, and the location functions that belong on the core side - the MME
+LCS function, the E-SMLC and the LMF.
 
-## Architecture
+The GMLC is **not** in this repository. It is a separate Java/Spring service at
+`github.com/ssonkokevin/gmlc`, because its hard work is SS7 MAP and Diameter and
+it reuses the SS7 stack already proven in the SMSC gateway. The two services
+talk over standard 3GPP interfaces only.
 
-| Component | Tech | Port | Role |
-|-----------|------|------|------|
-| STP | osmo-stp / SIGTRAN M3UA | 2905 | SS7/SIGTRAN routing (STP plane) |
-| DRA | Python Diameter agent (stub) | 3868 | Diameter routing/translation (separate plane from STP) |
-| SCP | Python CAMEL/INAP (stub) | 3869, 2906 | Service control plane (SCP-IN / CAMEL context) |
-| UDM | REST + MariaDB | 8080 | Unified data management (lab reference) |
-| PCF/PCRF | Python stub + PCC configs | 7777, 3868/3869 | Policy/charging scaffold (Npcf/Gx/Gy template) |
-| SMF | Python stub + PFCP profile | 7777, 8805 | Session control scaffold (N4 PFCP) |
-| UPF/PGW | Python datapath stub + DPE/CPE configs | 2152, 8805, 42050 | Unified PGW/UPF datapath scaffold |
-| GMLC (pilot) | Docs/config guidance | — | PaiCore GMLC LBS pilot plan (MAP/Diameter/SUPL/MLP/JSON) |
-| OAM | Placeholder service | 8081 | Operations & maintenance |
-| DB | MariaDB | 3306 | Core database |
-| Cache | Redis | 6379 | Session / routing cache |
-| Observability | Prometheus / Grafana | 9090 / 3000 | Metrics & dashboards |
+## Status, stated plainly
 
-## Quick Start
+| Area | State |
+|---|---|
+| osmo-stp, DRA, SCP, OAM | Configs and stubs that start; no conformance testing |
+| UDM/HSS/HLR (`udm/`) | Substantial: 115 HTTP endpoints, S6a/Cx, MAP answering, auth vectors |
+| MAP/SCCP server (`map_sccp/`) | Lab answering only; responses are hand-built byte strings, **not** ASN.1-conformant |
+| Diameter S6a/Cx (`diameter/`) | Lab answering only; no SLh, SLg or Sh |
+| PCF, SMF, UPF, CAMEL, OCS | Scaffolds |
+| MME, E-SMLC, LMF | **Not built yet** - this is the current work |
+| Tests | None in this repository yet; the location work adds them first |
+
+Everything labelled a stub is a stub. Do not present it as a network function
+that has passed an acceptance test.
+
+## Quick start
 
 ```bash
-cp .env.example .env
+cp .env.example .env    # change every secret before use
 docker compose build
 docker compose up -d
 docker compose ps
 ```
 
-> PCF/SMF/UPF and the local DRA/SCP are **buildable scaffolds/stubs** (config, APIs, and interface placeholders), not protocol-complete or production-ready network functions. Integrate and validate real protocol stacks, simulators, and security controls before any lab interop beyond basic health checks.
+Docker is not available on the current Windows development host, so the
+container build is **unverified**. Python services run directly on the host for
+tests.
 
-## Directory Layout
+## Directory layout
 
 ```
 5g-core-engine/
 ├── stp/            # SIGTRAN/M3UA STP (osmo-stp configs + build)
-├── dra/            # Diameter Routing Agent stub/config
-├── scp/            # Service Control Plane (CAMEL/INAP) stub
-├── udm/            # Unified Data Management reference
-├── pcf/            # PCF/PCRF scaffold (pcf.yaml, PCC, Diameter peers)
-├── smf/            # SMF scaffold (smf.yaml, N4 PFCP profile)
-├── upf/            # UPF/Unified PGW scaffold (upf/dpe/cpe/dpeMgr configs)
-├── gmlc/docs/      # PaiCore-aligned GMLC pilot notes
-├── database/       # SQL schemas (srg_db.sql, hssdbInitial.sql)
-├── docker/         # Dockerfiles (stp,dra,scp,udm,oam,pcf,smf,upf)
+├── dra/            # Diameter routing agent stub
+├── scp/            # CAMEL/INAP service control plane stub
+├── udm/            # Tri-mode UDM/HSS/HLR reference service
+├── pcf/ smf/ upf/  # PCF/PCRF, SMF, UPF scaffolds
+├── map_sccp/       # Lab MAP responder over SCCP
+├── diameter/       # Lab Diameter S6a/Cx responder
+├── mme/            # LTE MME with the LCS function (new)
+├── esmlc/          # E-SMLC: LCS-AP, LPP, LPPa (new)
+├── lmf/            # 5G LMF (later phase)
+├── lib/            # Shared positioning library and codecs (new)
+├── tools/sim/      # Simulated UE, eNB, gNB, HLR/HSS, MME, E-SMLC (new)
+├── database/       # MariaDB schemas, including database/location/
+├── docker/         # Dockerfiles per service
 ├── scripts/        # Build/bootstrap/provision/health scripts
-├── config/         # Shared configuration templates
-├── tests/          # Unit + integration tests
-├── observability/  # Prometheus/Grafana config
-└── docs/           # Architecture & runbooks
+├── tests/          # pytest suites (new)
+├── docs/           # Architecture, inspection, decisions and phase plan
+└── archive/        # Superseded material kept for reference only
 ```
 
-## PaiCore / GMLC Notes
+`archive/python-gmlc-stub/` is the old prototype gateway. It is not deployed,
+not referenced by compose, and not a basis for the product.
 
-- **jSS7 alignment:** PaiCore jSS7 provides SS7/SIGTRAN building blocks (M3UA/SCCP/TCAP/MAP/CAP). Use behind a narrow adapter boundary for SS7 logic; it is not an operator-ready STP by itself. Keep STP (SIGTRAN routing) and DRA (Diameter routing) as distinct planes.
-- **GMLC pilot:** see `gmlc/docs/GMLC-PILOT.md` and template section 44 for deployment, SS7 MAP/Diameter/MongoDB integration, JSON/MLP APIs, and test flows derived from `PaiCore/kevin/Documentation/GMLC_Documentation.md`.
-- **License/safety:** review exact `LICENSE` files for pinned PaiCore/jSS7/GMLC components before adoption; sanitize credentials/IMSI/MSISDN/IP in configs and captures.
+## Location services
+
+Read `docs/location/INSPECTION.md` (what exists today), `docs/location/DECISIONS.md`
+(why the split is drawn where it is) and `docs/location/PLAN.md` (phases and
+acceptance criteria). The rule that governs every result: a position is only
+ever returned with its method, uncertainty, confidence and age. If the network
+cannot measure, the result is cell-ID and says so.
 
 ## License
 
