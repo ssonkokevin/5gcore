@@ -1,0 +1,15 @@
+{
+  "origin_host": "pcf.core.local",
+  "origin_realm": "core.local",
+  "vendor_id": 10415,
+  "product_name": "SRG-PCRF",
+  "port": 3868,
+  "peers": [
+    {"name": "pgw", "host": "upf", "port": 3868, "realm": "core.local", "application": "gx"},
+    {"name": "pcscf", "host": "pcscf", "port": 3868, "realm": "core.local", "application": "gx"},
+    {"name": "ocs", "host": "ocs", "port": 3869, "realm": "core.local", "application": "gy"}
+  ],
+  "watchdog_timeout": 5,
+  "retransmit_timeout": 10,
+  "max_retransmit": 3
+}

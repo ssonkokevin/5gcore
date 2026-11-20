@@ -1,0 +1,770 @@
+version: "3.8"
+
+services:
+  db:
+    image: mariadb:10.6
+    container_name: core-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - core-db-data:/var/lib/mysql
+      - ./database:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "3306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+
+  hssdb:
+    image: mariadb:10.6
+    container_name: core-hssdb
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: hssdb
+      MYSQL_USER: hss
+      MYSQL_PASSWORD: ${HSS_DB_PASSWORD}
+    volumes:
+      - core-hssdb-data:/var/lib/mysql
+      - ./database/hssdbInitial.sql:/docker-entrypoint-initdb.d/hssdbInitial.sql:ro
+    ports:
+      - "3307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: core-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    volumes:
+      - core-redis-data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - core-net
+
+  # ========================================================================
+  # STP/DRA Layer (SS7/SIGTRAN + Diameter)
+  # ========================================================================
+  osmo-stp:
+    build:
+      context: .
+      dockerfile: docker/stp/Dockerfile
+    container_name: core-osmo-stp
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - STP_INSTANCE_ID=${STP_INSTANCE_ID:-srg01}
+      - STP_LOCAL_PC=${STP_LOCAL_PC:-3.14.4}
+      - STP_NI=${STP_NI:-natl}
+      - STP_ASP_MODE=${STP_ASP_MODE:-server}
+      - STP_LOCAL_IP=${STP_LOCAL_IP:-0.0.0.0}
+      - STP_LOCAL_PORT=${STP_LOCAL_PORT:-2905}
+      - STP_REMOTE_PCS=${STP_REMOTE_PCS:-}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+    volumes:
+      - ./stp/config:/etc/osmocom/stp:ro
+      - ./stp/scripts:/usr/local/bin/stp-scripts:ro
+    ports:
+      - "2905:2905/sctp"
+      - "2905:2905/udp"
+    command: ["/usr/local/bin/osmo-stp", "-c", "/etc/osmocom/stp/osmo-stp.cfg"]
+    networks:
+      - core-net
+
+  open5gs-dra:
+    build:
+      context: .
+      dockerfile: docker/dra/Dockerfile
+    container_name: core-dra
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      osmo-stp:
+        condition: service_started
+    environment:
+      - DRA_INSTANCE_ID=${DRA_INSTANCE_ID:-srg01}
+      - DRA_PORT=${DRA_PORT:-3868}
+      - DRA_REALM=${DRA_REALM:-core.local}
+      - DRA_ORIGIN_HOST=${DRA_ORIGIN_HOST:-dra.core.local}
+      - DRA_ORIGIN_REALM=${DRA_ORIGIN_REALM:-core.local}
+      - DRA_PRODUCT_NAME=${DRA_PRODUCT_NAME:-Open5GS-DRA}
+      - DRA_VENDOR_ID=${DRA_VENDOR_ID:-10415}
+      - DRA_PEER_CONFIG=${DRA_PEER_CONFIG:-/app/config/dra.json}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./dra/config:/app/config:ro
+      - ./dra/src:/app/src
+    ports:
+      - "3868:3868/tcp"
+      - "3868:3868/sctp"
+    command: ["python", "/app/src/dra_engine.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # Diameter S6a/Cx Server (HSS/HLR Interworking)
+  # ========================================================================
+  diameter-s6a-cx:
+    build:
+      context: .
+      dockerfile: docker/diameter/Dockerfile
+    container_name: core-diameter-s6a-cx
+    restart: unless-stopped
+    depends_on:
+      hssdb:
+        condition: service_healthy
+    environment:
+      - DIAMETER_ORIGIN_HOST=${DIAMETER_ORIGIN_HOST:-hss.core.local}
+      - DIAMETER_ORIGIN_REALM=${DIAMETER_ORIGIN_REALM:-core.local}
+      - DIAMETER_VENDOR_ID=${DIAMETER_VENDOR_ID:-10415}
+      - DIAMETER_PRODUCT_NAME=${DIAMETER_PRODUCT_NAME:-5G-Core-HSS}
+      - DIAMETER_PORT=${DIAMETER_PORT:-3868}
+      - DB_HOST=hssdb
+      - DB_PORT=3306
+      - DB_USER=hss
+      - DB_PASSWORD=${HSS_DB_PASSWORD}
+      - DB_NAME=hssdb
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "3868:3868/tcp"
+      - "3868:3868/sctp"
+    command: ["python", "/app/src/diameter_server.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # MAP/SCCP Stack (2G/3G HLR Interworking)
+  # ========================================================================
+  map-sccp:
+    build:
+      context: .
+      dockerfile: docker/map_sccp/Dockerfile
+    container_name: core-map-sccp
+    restart: unless-stopped
+    depends_on:
+      hssdb:
+        condition: service_healthy
+    environment:
+      - MAP_POINT_CODE=3142
+      - MAP_SSN_MAP=6
+      - MAP_GT_MAP=208010000000000
+      - MAP_PORT=2905
+      - DB_HOST=hssdb
+      - DB_PORT=3306
+      - DB_USER=hss
+      - DB_PASSWORD=${HSS_DB_PASSWORD}
+      - DB_NAME=hssdb
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "2905:2905/tcp"
+      - "2905:2905/udp"
+    command: ["python", "/app/src/map_sccp_server.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # CAMEL State Machine (SCP/CAMEL Call Control)
+  # ========================================================================
+  camel:
+    build:
+      context: .
+      dockerfile: docker/camel/Dockerfile
+    container_name: core-camel
+    restart: unless-stopped
+    depends_on:
+      hssdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      map-sccp:
+        condition: service_started
+    environment:
+      - CAMEL_GSM_SCF_ADDRESS=${CAMEL_GSM_SCF_ADDRESS:-scf.core.local}
+      - CAMEL_DEFAULT_PHASE=${CAMEL_DEFAULT_PHASE:-3}
+      - DB_HOST=hssdb
+      - DB_PORT=3306
+      - DB_USER=hss
+      - DB_PASSWORD=${HSS_DB_PASSWORD}
+      - DB_NAME=hssdb
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "2906:2906/tcp"
+      - "2906:2906/sctp"
+    command: ["python", "/app/src/camel_engine.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # OCS/Gy Client (Online Charging System - RFC 4006)
+  # ========================================================================
+  ocs:
+    build:
+      context: .
+      dockerfile: docker/ocs/Dockerfile
+    container_name: core-ocs
+    restart: unless-stopped
+    environment:
+      - OCS_ORIGIN_HOST=${OCS_ORIGIN_HOST:-ocs.core.local}
+      - OCS_ORIGIN_REALM=${OCS_ORIGIN_REALM:-core.local}
+      - OCS_VENDOR_ID=${OCS_VENDOR_ID:-10415}
+      - OCS_PRODUCT_NAME=${OCS_PRODUCT_NAME:-5G-Core-OCS}
+      - OCS_HOST=0.0.0.0
+      - OCS_PORT=${OCS_PORT:-3869}
+      - OCS_FAILURE_HANDLING=${OCS_FAILURE_HANDLING:-2}
+      - OCS_SESSION_TIMEOUT=${OCS_SESSION_TIMEOUT:-300}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    ports:
+      - "3869:3869/tcp"
+      - "3869:3869/sctp"
+    command: ["python", "/app/src/ocs_client.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # 5GC Control Plane (free5GC / Open5GS)
+  # ========================================================================
+  nrf:
+    image: free5gc/nrf:v3.4.0
+    container_name: core-nrf
+    restart: unless-stopped
+    environment:
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+      - DB_URI=mongodb://mongo:27017
+    ports:
+      - "8000:8000/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8000/nnrf-nfm/v1/nf-instances"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  mongo:
+    image: mongo:6
+    container_name: core-mongo
+    restart: unless-stopped
+    volumes:
+      - core-mongo-data:/data/db
+    ports:
+      - "27017:27017"
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.runCommand({ping:1})"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+
+  amf:
+    image: free5gc/amf:v3.4.0
+    container_name: core-amf
+    restart: unless-stopped
+    environment:
+      - AMF_ADDR=amf
+      - AMF_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+      - GUAMI_PLMN_MCC=001
+      - GUAMI_PLMN_MNC=01
+      - GUAMI_REGION_ID=1
+      - GUAMI_SET_ID=1
+      - TAI_PLMN_MCC=001
+      - TAI_PLMN_MNC=01
+      - TAI_TAC=1
+      - PLMN_SUPPORT_0_MCC=001
+      - PLMN_SUPPORT_0_MNC=01
+      - PLMN_SUPPORT_0_TAC=1
+      - N2_INTERFACE_AMF_ADDR=amf
+      - N2_INTERFACE_AMF_PORT=38412
+      - N2_INTERFACE_GNB_ADDR=gnb
+      - N2_INTERFACE_GNB_PORT=38412
+    ports:
+      - "8080:80/tcp"
+      - "38412:38412/sctp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+
+  smf:
+    image: free5gc/smf:v3.4.0
+    container_name: core-smf
+    restart: unless-stopped
+    environment:
+      - SMF_ADDR=smf
+      - SMF_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+      - UPF_ADDR=upf
+      - UPF_PORT=8805
+      - DNS_PRIMARY=8.8.8.8
+      - DNS_SECONDARY=8.8.4.4
+      - SUBNET_POOL=10.60.0.0/16
+    ports:
+      - "8081:80/tcp"
+      - "8805:8805/udp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+      upf:
+        condition: service_started
+
+  upf:
+    image: free5gc/upf:v3.4.0
+    container_name: core-upf
+    restart: unless-stopped
+    environment:
+      - UPF_ADDR=upf
+      - UPF_PORT=8805
+      - N3_INTERFACE_UPF_ADDR=upf
+      - N3_INTERFACE_UPF_PORT=2152
+      - N4_INTERFACE_UPF_ADDR=upf
+      - N4_INTERFACE_UPF_PORT=8805
+      - N4_INTERFACE_SMF_ADDR=smf
+      - N4_INTERFACE_SMF_PORT=8805
+    ports:
+      - "2152:2152/udp"
+      - "8805:8805/udp"
+      - "42050:42050/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8805"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      smf:
+        condition: service_started
+
+  ausf:
+    image: free5gc/ausf:v3.4.0
+    container_name: core-ausf
+    restart: unless-stopped
+    environment:
+      - AUSF_ADDR=ausf
+      - AUSF_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+    ports:
+      - "8082:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+
+  udm:
+    image: free5gc/udm:v3.4.0
+    container_name: core-udm-free5gc
+    restart: unless-stopped
+    environment:
+      - UDM_ADDR=udm
+      - UDM_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+      - DB_URI=mongodb://mongo:27017
+    ports:
+      - "8083:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+
+  # Custom UDM with Tri-Mode (5G/4G/3G/2G) + Batch Upload
+  custom-udm:
+    build:
+      context: .
+      dockerfile: docker/udm/Dockerfile
+    container_name: core-custom-udm
+    restart: unless-stopped
+    depends_on:
+      hssdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - UDM_PORT=8080
+      - DB_HOST=hssdb
+      - DB_PORT=3306
+      - DB_USER=hss
+      - DB_PASSWORD=${HSS_DB_PASSWORD}
+      - DB_NAME=hssdb
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - OPERATOR_KEY=${OPERATOR_KEY:-00000000000000000000000000000000}
+    volumes:
+      - ./udm/src:/app/src
+    ports:
+      - "8080:8080/tcp"
+    command: ["python", "/app/src/udm_server.py"]
+    networks:
+      - core-net
+
+  pcf:
+    image: free5gc/pcf:v3.4.0
+    container_name: core-pcf-free5gc
+    restart: unless-stopped
+    environment:
+      - PCF_ADDR=pcf
+      - PCF_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+    ports:
+      - "8084:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+
+  chf:
+    image: free5gc/chf:v3.4.0
+    container_name: core-chf
+    restart: unless-stopped
+    environment:
+      - CHF_ADDR=chf
+      - CHF_PORT=80
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+    ports:
+      - "8085:80/tcp"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:80"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - core-net
+    depends_on:
+      nrf:
+        condition: service_healthy
+
+  # ========================================================================
+  # SCP / Legacy SS7 Control Plane
+  # ========================================================================
+  scp:
+    build:
+      context: .
+      dockerfile: docker/scp/Dockerfile
+    container_name: core-scp
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      open5gs-dra:
+        condition: service_started
+    environment:
+      - SCP_PORT=${SCP_PORT:-3869}
+      - SCP_REALM=${SCP_REALM:-core.local}
+      - SCP_ORIGIN_HOST=${SCP_ORIGIN_HOST:-scp.core.local}
+      - SCP_ORIGIN_REALM=${SCP_ORIGIN_REALM:-core.local}
+      - SCP_CAMEL_PORT=${SCP_CAMEL_PORT:-2906}
+      - DRA_HOST=open5gs-dra
+      - DRA_PORT=${DRA_PORT:-3868}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./scp/src:/app/src
+      - ./scp/config:/app/config:ro
+    ports:
+      - "3869:3868/tcp"
+      - "2906:2905/sctp"
+    command: ["python", "/app/src/scp_engine.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # Custom PCF/SMF/UPF (from engine scaffolds)
+  # ========================================================================
+  custom-pcf:
+    build:
+      context: .
+      dockerfile: docker/pcf/Dockerfile
+    container_name: core-custom-pcf
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - PCF_HOST=0.0.0.0
+      - PCF_PORT=${PCF_PORT:-7777}
+      - PCF_REALM=${PCF_REALM:-core.local}
+      - PCF_ORIGIN_HOST=${PCF_ORIGIN_HOST:-pcf.core.local}
+      - GX_PORT=${GX_PORT:-3870}
+      - GY_PORT=${GY_PORT:-3871}
+      - PCRFDB_URI=${PCRFDB_URI:-sqlite:///app/pcrf.db}
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./pcf/config:/app/config:ro
+      - ./pcf/src:/app/src
+    ports:
+      - "7777:7777/tcp"
+      - "3870:3868/tcp"
+      - "3871:3869/tcp"
+    command: ["python", "/app/src/pcf_server.py"]
+    networks:
+      - core-net
+
+  custom-smf:
+    build:
+      context: .
+      dockerfile: docker/smf/Dockerfile
+    container_name: core-custom-smf
+    restart: unless-stopped
+    depends_on:
+      upf:
+        condition: service_started
+    environment:
+      - SMF_HOST=0.0.0.0
+      - SMF_PORT=${SMF_PORT:-7778}
+      - SMF_REALM=${SMF_REALM:-core.local}
+      - SMF_DNN=${SMF_DNN:-internet}
+      - SMF_UE_SUBNET=${SMF_UE_SUBNET:-10.60.0.0/16}
+      - N4_SMF_UPF_ADDR=upf
+      - PFCP_PORT=${PFCP_PORT:-8805}
+      - NRF_ADDR=nrf
+      - NRF_PORT=8000
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./smf/config:/app/config:ro
+      - ./smf/src:/app/src
+    ports:
+      - "7778:7777/tcp"
+      - "8806:8805/udp"
+    command: ["python", "/app/src/smf_server.py"]
+    networks:
+      - core-net
+
+  custom-upf:
+    build:
+      context: .
+      dockerfile: docker/upf/Dockerfile
+    container_name: core-custom-upf
+    restart: unless-stopped
+    environment:
+      - UPF_CONFIG_DIR=/app/config
+      - PFCP_PORT=${PFCP_PORT:-8805}
+      - GTPU_PORT=${GTPU_PORT:-2152}
+      - DATA_PATH_MODE=${DATA_PATH_MODE:-kernel}
+      - DPDK_ENABLED=${DPDK_ENABLED:-false}
+      - DPI_ENABLED=${DPI_ENABLED:-false}
+      - CGNAT_ENABLED=${CGNAT_ENABLED:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./upf/config:/app/config:ro
+      - ./upf/src:/app/src
+    ports:
+      - "2152:2152/udp"
+      - "8805:8805/udp"
+      - "42050:42050/tcp"
+    command: ["python3", "/app/src/upf_server.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # GMLC (Location Services)
+  # ========================================================================
+  gmlc:
+    build:
+      context: .
+      dockerfile: docker/gmlc/Dockerfile
+    container_name: core-gmlc
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - GMLC_HOST=0.0.0.0
+      - GMLC_PORT=${GMLC_PORT:-8082}
+      - GMLC_REALM=${GMLC_REALM:-core.local}
+      - GMLC_ORIGIN_HOST=${GMLC_ORIGIN_HOST:-gmlc.core.local}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./gmlc/config:/app/config:ro
+      - ./gmlc/src:/app/src
+    ports:
+      - "8082:8082/tcp"
+    command: ["python", "/app/src/gmlc_server.py"]
+    networks:
+      - core-net
+
+  # ========================================================================
+  # OAM / Observability
+  # ========================================================================
+  oam:
+    build:
+      context: .
+      dockerfile: docker/oam/Dockerfile
+    container_name: core-oam
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      hssdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - OAM_PORT=${OAM_PORT:-8081}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - HSS_DB_HOST=hssdb
+      - HSS_DB_PORT=3306
+      - HSS_DB_USER=hss
+      - HSS_DB_PASSWORD=${HSS_DB_PASSWORD}
+      - HSS_DB_NAME=hssdb
+      - REDIS_HOST=${REDIS_HOST}
+      - REDIS_PORT=${REDIS_PORT}
+      - REDIS_PASSWORD=${REDIS_PASSWORD}
+      - OAM_USER=${OAM_USER}
+      - OAM_PASSWORD=${OAM_PASSWORD}
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY}
+      - DJANGO_DEBUG=True
+    volumes:
+      - ./oam:/app:ro
+    ports:
+      - "8081:8081/tcp"
+    command: ["python", "/app/manage.py", "runserver", "0.0.0.0:8081"]
+    networks:
+      - core-net
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: core-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090/tcp"
+    networks:
+      - core-net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: core-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - core-grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000/tcp"
+    networks:
+      - core-net
+
+networks:
+  core-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  core-db-data:
+  core-hssdb-data:
+  core-redis-data:
+  core-grafana-data:
+  core-mongo-data:

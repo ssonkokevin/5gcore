@@ -1,0 +1,7 @@
+# STP/DRA Route Table (mirrors tbl_stp_route from ham_stp1_tbl_stp_route.sql)
+# Format: dpc,opc,si,ssn,route_mode,destination
+# route_mode: redundant | primary | backup
+0.0.0,0.0.0,3,0,redundant,dra
+1.1.1,2.2.2,3,8,redundant,udm
+1.1.1,3.3.3,3,8,primary,udm
+2.2.2,1.1.1,3,8,redundant,scp

@@ -1,0 +1,91 @@
+# GMLC Configuration for 5G Core Engine
+# Aligned with PaiCore GMLC Documentation (GMLC_Documentation.md)
+# Supports LCS (Location Services) per 3GPP TS 23.271, 29.171
+
+gmlc:
+  host: "0.0.0.0"
+  port: 8082
+  realm: "core.local"
+  origin_host: "gmlc.core.local"
+  origin_realm: "core.local"
+
+# Database (MariaDB for subscriber location data)
+database:
+  host: "${DB_HOST}"
+  port: ${DB_PORT}
+  user: "${DB_USER}"
+  password: "${DB_PASSWORD}"
+  name: "${DB_NAME}"
+
+# Redis for caching location requests
+redis:
+  host: "${REDIS_HOST}"
+  port: ${REDIS_PORT}
+  password: "${REDIS_PASSWORD}"
+
+# MAP/CAMEL Interface (SS7/SIGTRAN via STP)
+map:
+  enabled: true
+  local_ssn: 8
+  remote_ssn: 8
+  stp_host: "osmo-stp"
+  stp_port: 2905
+  sctp_role: "client"
+
+# Diameter Interface (SLh/SLg per 29.171/29.172)
+diameter:
+  enabled: true
+  port: 3869
+  realm: "core.local"
+  origin_host: "gmlc.core.local"
+  vendor_id: 10415
+  product_name: "PaiCore-GMLC"
+  peers:
+    - name: "hss"
+      host: "hss.core.local"
+      port: 3868
+      realm: "core.local"
+      applications:
+        - 16777291  # SLh (LIR/LIA)
+        - 16777292  # SLg (SLR/SLA)
+
+# LCS (Location Services) Configuration
+lcs:
+  # Location request types supported
+  request_types:
+    - "immediate"
+    - "deferred"
+    - "periodic"
+  
+  # Accuracy requirements
+  horizontal_accuracy: 50  # meters
+  vertical_accuracy: 50    # meters
+  
+  # QoS
+  response_time: 20        # seconds
+  max_retransmissions: 3
+
+# Supported 3GPP Interfaces
+interfaces:
+  slh: true   # GMLC <-> HSS (LIR/LIA)
+  slg: true   # GMLC <-> MME/SGSN (SLR/SLA)
+  slp: true   # GMLC <-> SMLC (PSAP)
+  lcs_cap: true
+
+# Privacy/Authorization
+privacy:
+  check_privacy: true
+  default_privacy_class: "location_allowed"
+  override_privacy_emergency: true
+
+# Logging
+log:
+  level: "${LOG_LEVEL:-info}"
+  format: "json"
+  file: "/var/log/gmlc/gmlc.log"
+
+# External GMLC (PaiCore GMLC integration)
+external_gmlc:
+  enabled: false
+  endpoint: ""
+  api_key: ""

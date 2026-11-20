@@ -1,0 +1,13 @@
+# OAM minimal Django stub (Vue 2 frontend lives here)
+{
+  "service": "oam",
+  "version": "1.0.0",
+  "frontend": "vue2",
+  "port": 8081,
+  "features": [
+    "subscriber_provisioning",
+    "route_management",
+    "service_logic_provisioning",
+    "traffic_monitoring"
+  ]
+}

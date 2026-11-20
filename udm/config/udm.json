@@ -1,0 +1,9 @@
+# UDM config (shared)
+{
+  "service": "udm",
+  "version": "1.0.0",
+  "schema_source": "hssdbInitial.sql",
+  "tri_mode": ["HLR", "HSS", "UDM"],
+  "auth_algorithms": ["MILENAGE", "TUAK"],
+  "cache_ttl_seconds": 300
+}
