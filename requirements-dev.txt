@@ -3,4 +3,7 @@
 pytest==9.2.0
 jsonschema==4.26.0
 sqlglot==30.33.0
-# Phase 2 (codec generation from the 3GPP ASN.1 annexes) adds asn1tools here.
+# Phase 2 codec generation from the 3GPP ASN.1 annexes.
+# asn1tools cannot parse information object classes (the 3GPP PDU pattern),
+# so the compiler is pycrate; see docs/location/DECISIONS.md D4a.
+pycrate==0.8.1

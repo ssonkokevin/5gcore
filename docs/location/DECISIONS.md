@@ -81,6 +81,28 @@ annex), the module is still taken verbatim from the annex; no paraphrasing.
 
 ---
 
+## D4a. The ASN.1 compiler is pycrate, because asn1tools cannot read CLASS
+
+**Decision.** The modules in D4 are compiled with `pycrate-asn1c`, not
+`asn1tools`. `lib/codecs/build_lcsap.py` extracts the annex from the delivered
+docx (rejoining the formatted runs), compiles it, and writes both
+`asn1/lcsap.asn` and the generated `lcsap_codec.py`. A test regenerates the
+module and fails when the committed copy is stale.
+
+**Why.** Every 3GPP PDU module uses information object classes
+(`LCS-AP-PDU ::= CHOICE` over `LCS-AP-ELEMENTARY-PROCEDURE.&InitiatingMessage`)
+and parameterised open types. `asn1tools` refuses `CLASS`; pycrate resolves it.
+Trying asn1tools first is recorded here so nobody repeats the attempt.
+
+**Evidence that the generated codec is conformant.** A plain SEQUENCE encoded
+by pycrate and by asn1tools is byte-identical under aligned PER, and LCS-AP
+messages round-trip through the generated module in `tests/test_lcsap_codec.py`.
+
+**Repairs.** The docx has two formatting artefacts; the builder lists them and
+a compile failure is raised, never swallowed. No protocol type is altered.
+
+---
+
 ## D5. Transport abstraction: SCTP in production, TCP carrier in the lab
 
 **Decision.** Every SIGTRAN-facing component talks through a small transport
