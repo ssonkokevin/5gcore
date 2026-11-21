@@ -22,7 +22,7 @@ for _p in (ROOT, ROOT / "mme" / "src", ROOT / "esmlc" / "src"):
     sys.path.insert(0, str(_p))
 
 from corelib import diameter as d  # noqa: E402
-from lib.codecs import lcsap  # noqa: E402
+from lib.codecs import lcsap, lpp  # noqa: E402
 
 import cell_plan  # noqa: E402
 import esmlc_sim  # noqa: E402
@@ -235,11 +235,30 @@ class SlgAvps(unittest.TestCase):
         self.assertEqual(slg.location_answer_avps(outcome), [])
 
 
+def lpp_answer(request, *, number_shift=0, abort=False, failure=None):
+    """Answer a relayed LPP request the way a UE would: a
+    ProvideLocationInformation for the same transaction, no position."""
+    asked = lpp.parse(bytes.fromhex(request["apdu"]))
+    number = (asked.transaction_id.number + number_shift) & 0xFF
+    if abort:
+        apdu = lpp.abort("targetDeviceAbort",
+                         initiator=lpp.INITIATOR_TARGET_DEVICE,
+                         transaction_number=number)
+    else:
+        apdu = lpp.provide_location_information(
+            failure=failure, initiator=lpp.INITIATOR_TARGET_DEVICE,
+            transaction_number=number)
+    return 200, {"apdu": apdu.hex()}
+
+
 class _NasHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
-        self.server.requests.append(json.loads(self.rfile.read(length)))
+        request = json.loads(self.rfile.read(length))
+        self.server.requests.append(request)
         status, payload = self.server.reply
+        if callable(payload):
+            status, payload = payload(request)
         body = json.dumps(payload).encode() if payload is not None else b""
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -310,8 +329,8 @@ class AgainstTheSimulator(unittest.TestCase):
                                           lpp_timeout=1.0)
         cls.sim.start()
         cls.plan = cell_plan.CellPlan.from_file(cell_plan.DEFAULT_CONFIG)
-        # Target A asks for one LPP round; this UE answers any APDU.
-        cls.nas = NasStub({"apdu": "00ff"})
+        # Target A asks for one LPP round; this UE answers real LPP.
+        cls.nas = NasStub(lpp_answer)
         cls.nas.__enter__()
 
     @classmethod
@@ -386,12 +405,39 @@ class AgainstTheSimulator(unittest.TestCase):
         self.assertEqual(outcome.result_code, d.RESULT_USER_UNKNOWN)
 
     def test_lpp_is_relayed_to_the_ue_and_back(self):
-        with NasStub({"apdu": "00ff"}) as stub:
+        with NasStub(lpp_answer) as stub:
             outcome = self.service(self.ctx(nas_url=stub.url)).locate(LAB_UE_A, 50.0)
             self.assertTrue(outcome.positioned)
             self.assertEqual(outcome.lpp_rounds, 1)
-            expected = esmlc_sim.LAB_TOKEN_PREFIX + (CELL_A).to_bytes(4, "big") + b"\x00"
-            self.assertEqual(stub.requests[0]["apdu"], expected.hex())
+            asked = lpp.parse(bytes.fromhex(stub.requests[0]["apdu"]))
+            self.assertEqual(asked.kind, lpp.REQUEST_LOCATION_INFORMATION)
+            self.assertEqual(asked.transaction_id.initiator,
+                             lpp.INITIATOR_LOCATION_SERVER)
+            self.assertTrue(asked.end_transaction)
+            common = (asked.body["criticalExtensions"][1][1]
+                      ["commonIEsRequestLocationInformation"])
+            self.assertEqual(common["qos"]["horizontalAccuracy"]["accuracy"],
+                             lcsap.uncertainty_code(35.0))
+            self.assertEqual(stub.requests[0]["imsi"], LAB_UE_A)
+
+    def test_an_answer_for_another_transaction_fails_the_dialogue(self):
+        before = self.sim.counters["lpp_rejected"]
+        with NasStub(lambda request: lpp_answer(request, number_shift=1)) as stub:
+            outcome = self.service(self.ctx(nas_url=stub.url)).locate(LAB_UE_A, 50.0)
+        self.assertEqual(outcome.source, "CELL_PLAN")
+        self.assertIn("E-SMLC", outcome.detail)
+        self.assertGreater(self.sim.counters["lpp_rejected"], before)
+
+    def test_a_ue_abort_fails_the_dialogue(self):
+        with NasStub(lambda request: lpp_answer(request, abort=True)) as stub:
+            outcome = self.service(self.ctx(nas_url=stub.url)).locate(LAB_UE_A, 50.0)
+        self.assertEqual(outcome.source, "CELL_PLAN")
+
+    def test_a_ue_failure_cause_fails_the_dialogue(self):
+        with NasStub(lambda request: lpp_answer(
+                request, failure=lpp.FAILURE_POSITION_METHOD)) as stub:
+            outcome = self.service(self.ctx(nas_url=stub.url)).locate(LAB_UE_A, 50.0)
+        self.assertEqual(outcome.source, "CELL_PLAN")
 
     def test_a_ue_that_ignores_lpp_falls_back_to_the_plan(self):
         with NasStub(None, status=204) as stub:

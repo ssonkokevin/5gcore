@@ -1,14 +1,17 @@
 """Lab E-SMLC: an SLs listener that answers from a fixed synthetic table.
 
 A real E-SMLC runs positioning (E-CID, OTDOA, GNSS assistance) and speaks
-LPP to the UE through the MME. This simulator does neither. It answers a
+LPP to the UE through the MME. This simulator has no solver: it answers a
 Location-Request with the position configured for that IMSI or cell, or with
 an unsuccessful response when the table has no entry. It never interpolates,
-hashes or otherwise invents a position: an unknown target gets a cause.
+hashes or otherwise invents a position.
 
-The LPP dialogue is simulated with a labelled opaque token. TS 37.355 decoding
-is a later work package; the point of this simulator is to prove the MME
-relays an APDU unchanged in both directions and counts its rounds.
+The LPP dialogue is real TS 37.355: the simulator sends a
+RequestLocationInformation for a transaction, and the UE must answer with a
+ProvideLocationInformation carrying the same transaction number and no
+failure cause. Any other answer, or none, fails the dialogue. The UE's
+estimate, if it sends one, is not used: the table is the only position
+source until the assistance and solver work packages land.
 
 Every configured coordinate is synthetic. The file says so as well.
 """
@@ -18,7 +21,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import struct
 import sys
 import time
 from dataclasses import dataclass
@@ -30,7 +32,7 @@ for _p in (os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
         sys.path.insert(0, _p)
 
 from corelib import sls  # noqa: E402
-from lib.codecs import lcsap  # noqa: E402
+from lib.codecs import lcsap, lpp  # noqa: E402
 
 logger = logging.getLogger("esmlc")
 
@@ -43,9 +45,6 @@ _METHODS = {
     "u-tdoa": lcsap.METHOD_U_TDOA,
 }
 
-LAB_TOKEN_PREFIX = b"LABLPP\x01"
-
-
 @dataclass(frozen=True)
 class SimulatedTarget:
     imsi: Optional[bytes]
@@ -56,11 +55,6 @@ class SimulatedTarget:
     radius_m: float
     method: int
     lpp_rounds: int
-
-    def token(self, round_no: int) -> bytes:
-        """An opaque, labelled stand-in for an LPP APDU."""
-        cell = self.cell or 0
-        return LAB_TOKEN_PREFIX + struct.pack("!IB", cell, round_no)
 
 
 class PositionTable:
@@ -124,6 +118,7 @@ class EsmlcSimulator:
             "aborts": 0,
             "resets": 0,
             "lpp_rounds": 0,
+            "lpp_rejected": 0,
             "unreadable": 0,
         }
         self.last: Optional[dict] = None
@@ -144,8 +139,10 @@ class EsmlcSimulator:
     def handle(self, pdu: bytes, connection: sls.SlsConnection) -> Optional[bytes]:
         try:
             message = lcsap.parse(pdu)
-        except lcsap.LcsApError:
+        except lcsap.LcsApError as exc:
             self.counters["unreadable"] += 1
+            logger.warning("unreadable LCS-AP PDU (%d octets, %s): %s",
+                           len(pdu), pdu[:16].hex(), exc)
             return None
         if message.procedure == lcsap.PROC_RESET:
             if message.kind != lcsap.INITIATING:
@@ -202,9 +199,21 @@ class EsmlcSimulator:
 
     def _relay_lpp(self, correlation: bytes, target: SimulatedTarget,
                    connection: sls.SlsConnection) -> bool:
+        """Request a position over real LPP, one transaction per round. The
+        requested accuracy is the one the table gives, so the dialogue asks
+        for exactly what the answer will claim."""
+        area = lpp.circle(target.latitude, target.longitude, target.radius_m)
+        first_number = correlation[-1]
         for round_no in range(target.lpp_rounds):
+            number = (first_number + round_no) & 0xFF
+            request = lpp.request_location_information(
+                transaction_number=number,
+                accuracy_code=area.uncertainty_code,
+                end_transaction=round_no == target.lpp_rounds - 1,
+                sequence_number=round_no,
+            )
             connection.send(lcsap.connection_oriented_information(
-                correlation, target.token(round_no)))
+                correlation, request))
             self.counters["lpp_rounds"] += 1
             try:
                 reply = connection.receive(self.lpp_timeout)
@@ -222,6 +231,23 @@ class EsmlcSimulator:
                     or lcsap.correlation_id(answer) != correlation
                     or lcsap.lpp_apdu(answer) is None):
                 return False
+            if not self._accept_lpp_answer(lcsap.lpp_apdu(answer), number):
+                return False
+        return True
+
+    def _accept_lpp_answer(self, apdu: bytes, number: int) -> bool:
+        try:
+            answer = lpp.parse(apdu)
+        except lpp.LppError:
+            self.counters["lpp_rejected"] += 1
+            return False
+        if (answer.kind != lpp.PROVIDE_LOCATION_INFORMATION
+                or answer.transaction_id is None
+                or answer.transaction_id.initiator != lpp.INITIATOR_TARGET_DEVICE
+                or answer.transaction_id.number != number
+                or lpp.location_failure(answer) is not None):
+            self.counters["lpp_rejected"] += 1
+            return False
         return True
 
 
