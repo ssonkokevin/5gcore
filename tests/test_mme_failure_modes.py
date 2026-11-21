@@ -171,14 +171,16 @@ class FailureModes(unittest.TestCase):
             outcome = self.service(fake.port).locate(LAB_UE_A)
         self.assert_cell_plan_fallback(outcome, "the E-SMLC refused: misc/unspecified")
 
-    def test_more_than_eight_lpp_rounds_aborts_the_client(self):
+    def test_more_than_eight_measurement_rounds_aborts_the_client(self):
         with ScriptedEsmc("rounds") as fake:
             client = LcsApClient("127.0.0.1", fake.port, timeout=5.0)
             with self.assertRaises(LcsApClientError) as caught:
                 client.locate(b"\x00\x00\x00\x07", (CELL_A, 28),
                               lpp_transport=lambda apdu: b"\x01")
             client.close()
-        self.assertIn("more than 8 LPP rounds", str(caught.exception))
+        # The cap covers LPP and LPPa rounds together, so the message names
+        # measurement rounds rather than LPP rounds.
+        self.assertIn("more than 8 measurement rounds", str(caught.exception))
 
     def test_a_ue_that_cannot_answer_lpp_makes_the_esmlc_refuse(self):
         table = esmlc_sim.PositionTable.from_file(esmlc_sim.DEFAULT_CONFIG)

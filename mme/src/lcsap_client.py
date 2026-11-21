@@ -1,11 +1,13 @@
 """The MME's SLs client: one LCS-AP location dialogue per target UE.
 
 The client sends Location-Request and waits for Location-Response, but an
-E-SMLC may first ask the UE for LPP information. Those requests arrive as
-Connection-Oriented-Information; the client hands the APDU to the caller's
-NAS transport callback and relays the UE's answer back unchanged. It never
-decodes LPP: the TS 37.355 codec is a later work package, and relaying an
-opaque APDU is all the MME has to do.
+E-SMLC may first ask for measurements. Those requests arrive as
+Connection-Oriented-Information and the Payload-Type IE says which interface
+they belong to: lPP goes to the UE over NAS, lPPa goes to the eNB over S1AP.
+The client hands the APDU to the matching transport and relays the answer
+back unchanged, under the same payload type. It never decodes LPP or LPPa;
+relaying an opaque APDU is all the MME has to do (the codecs are used by the
+UE and the eNB, not here).
 
 A transaction is synchronous and owned by one SLs association. A caller with
 concurrent sessions opens one client (one connection) per session.
@@ -44,6 +46,7 @@ class LocationResult:
     method: Optional[int]
     lpp_rounds: int
     elapsed: float
+    lppa_rounds: int = 0
 
     @property
     def positioned(self) -> bool:
@@ -94,18 +97,23 @@ class LcsApClient:
                horizontal_accuracy_m: Optional[float] = None,
                positioning_capability: Optional[bytes] = None,
                lpp_transport: Optional[LppTransport] = None,
+               lppa_transport: Optional[LppTransport] = None,
                timeout: Optional[float] = None) -> LocationResult:
         """Run one Location-Request dialogue to its answer.
 
-        lpp_transport carries an LPP APDU to the UE and returns the UE's
-        answer, or None when the UE cannot be reached. Without a transport,
-        an E-SMLC LPP request aborts the dialogue instead of being ignored.
+        lpp_transport carries an LPP APDU to the UE over NAS; lppa_transport
+        carries an LPPa APDU to the eNB over S1AP. Each returns the peer's
+        answer, or None when the peer cannot be reached. Without the matching
+        transport, a request for that payload aborts the dialogue instead of
+        being ignored.
         """
         self.connect()
         budget = self.timeout if timeout is None else timeout
         started = time.monotonic()
         deadline = started + budget
         rounds = 0
+        lpp_rounds = 0
+        lppa_rounds = 0
         request = lcsap.location_request(
             correlation_id, cell_id, imsi=imsi, plmn=plmn,
             location_type=location_type, client_type=client_type,
@@ -147,13 +155,20 @@ class LcsApClient:
                     if rounds > MAX_LPP_ROUNDS:
                         self._abort(correlation_id)
                         raise LcsApClientError(
-                            f"the E-SMLC sent more than {MAX_LPP_ROUNDS} LPP rounds")
-                    self._relay_lpp(correlation_id, message, lpp_transport)
+                            f"the E-SMLC sent more than {MAX_LPP_ROUNDS} "
+                            "measurement rounds")
+                    payload = self._relay_apdu(
+                        correlation_id, message, lpp_transport, lppa_transport)
+                    if payload == lcsap.PAYLOAD_LPPA:
+                        lppa_rounds += 1
+                    else:
+                        lpp_rounds += 1
                     deadline = time.monotonic() + budget
                     continue
                 if message.procedure == lcsap.PROC_LOCATION_SERVICE:
-                    return self._result(message, correlation_id, rounds,
-                                        time.monotonic() - started)
+                    return self._result(message, correlation_id, lpp_rounds,
+                                        elapsed=time.monotonic() - started,
+                                        lppa_rounds=lppa_rounds)
                 raise LcsApClientError(
                     f"unexpected LCS-AP procedure {message.procedure}")
         except sls.SlsError as exc:
@@ -175,24 +190,49 @@ class LcsApClient:
             raise LcsApClientError(
                 "the E-SMLC did not acknowledge the Reset-Request")
 
-    def _relay_lpp(self, correlation_id: bytes, message: lcsap.LcsApMessage,
-                   transport: Optional[LppTransport]) -> None:
+    def _relay_apdu(self, correlation_id: bytes, message: lcsap.LcsApMessage,
+                    lpp_transport: Optional[LppTransport],
+                    lppa_transport: Optional[LppTransport]) -> str:
+        """Relay one APDU and return the payload type it was carried under.
+        The transport argument None means this MME has no path to that peer,
+        which ends the dialogue rather than dropping the E-SMLC's request."""
         apdu = lcsap.lpp_apdu(message)
         if apdu is None:
             self._abort(correlation_id)
             raise LcsApClientError(
                 "Connection-Oriented-Information carried no APDU")
+        payload = lcsap.payload_type(message)
+        if payload is None:
+            self._abort(correlation_id)
+            raise LcsApClientError(
+                "Connection-Oriented-Information carried no Payload-Type")
+        if payload == lcsap.PAYLOAD_LPPA:
+            transport, label = lppa_transport, "LPPa and this MME has no S1 association"
+        elif payload == lcsap.PAYLOAD_LPP:
+            transport, label = lpp_transport, "LPP and this MME has no NAS transport"
+        else:
+            self._abort(correlation_id)
+            raise LcsApClientError(
+                f"the E-SMLC sent payload type {payload!r}, which this MME "
+                "cannot route")
         if transport is None:
             self._abort(correlation_id)
             raise LcsApClientError(
-                "the E-SMLC asked for LPP but this MME has no NAS transport")
-        answer = transport(apdu)
+                f"the E-SMLC asked for {label}")
+        try:
+            answer = transport(apdu)
+        except (RuntimeError, OSError) as exc:
+            # A relay that cannot reach its peer (e.g. the eNB closed S1) ends
+            # the dialogue; leaving the E-SMLC waiting would just burn its timer.
+            self._abort(correlation_id)
+            raise LcsApClientError(f"relaying {payload} failed: {exc}") from exc
         if answer is not None:
-            self._connection.send(
-                lcsap.connection_oriented_information(correlation_id, answer))
+            self._connection.send(lcsap.connection_oriented_information(
+                correlation_id, answer, payload_type=payload))
+        return payload
 
     def _result(self, message: lcsap.LcsApMessage, correlation_id: bytes,
-                rounds: int, elapsed: float) -> LocationResult:
+                rounds: int, elapsed: float, lppa_rounds: int = 0) -> LocationResult:
         try:
             circle = lcsap.decode_area(message)
         except lcsap.LcsApError as exc:
@@ -208,6 +248,7 @@ class LcsApClient:
             method=lcsap.positioning_data(message),
             lpp_rounds=rounds,
             elapsed=elapsed,
+            lppa_rounds=lppa_rounds,
         )
 
     def _abort(self, correlation_id: bytes) -> None:

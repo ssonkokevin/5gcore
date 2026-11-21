@@ -1,9 +1,9 @@
 # Phase 2 checkpoint - the 4G E-SMLC path
 
-Date: 2026-11-21. Status: 2a, 2b, the S1AP codec half of 2e and the UE half
-of 2f delivered; 2c, 2d, the MME relay half of 2e, the eNB half of 2f and
-the pcap export are open. This note is the evidence for PLAN 2g/2h and the
-honest list of what a Phase 2 request can and cannot do today.
+Date: 2026-11-21. Status: 2a, 2b, 2e (S1AP and LPPa codecs, the MME's S1
+association and LPPa relay, the lab eNB) and 2f (lab UE) delivered; 2c, 2d
+and the pcap export are open. This note is the evidence for PLAN 2g/2h and
+the honest list of what a Phase 2 request can and cannot do today.
 
 Everything here runs on the Windows development host over the D5 TCP carrier,
 with in-process simulators. No SCTP association, Docker, MariaDB or radio has
@@ -16,14 +16,16 @@ been exercised. Coordinates are synthetic for lab PLMN 001-01.
 | LCS-AP codec (TS 29.171) | `lib/codecs/lcsap.py`, generated from the annex | 2a done |
 | LPP codec (TS 37.355) | `lib/codecs/lpp.py`, generated from the annex | 2b done; broadcast module compiled, not used yet |
 | SLs listener/client, reset and abort | `corelib/sls.py`, `mme/src/lcsap_client.py` | 2a done over TCP; SCTP unverified |
-| Lab E-SMLC | `esmlc/src/esmlc_sim.py` | sends real LPP and validates the answer; opt-in RequestCapabilities exchange; answers from a fixed table; no positioning engine |
+| Lab E-SMLC | `esmlc/src/esmlc_sim.py` | sends real LPP and validates the answer; opt-in RequestCapabilities exchange; opt-in E-CID over LPPa; answers from a fixed table; no positioning engine |
 | MME SLg server | `mme/src/mme_server.py` | PLR/PLA, RIR/RIA; LRR/LRA refused with 5012 (Phase 4) |
 | MME UE contexts and paging | `mme/src/ue_contexts.py` | connected, idle+answers, idle+ignores; lab seeding endpoint |
 | LPP NAS relay | `mme/src/lcsap_client.py`, `nas_relay.py` | MME relays opaquely; the E-SMLC and lab UE speak TS 37.355 |
 | Lab UE | `esmlc/src/lpp_ue.py` | six LPP behaviours behind an HTTP endpoint; answers real TS 37.355, no measurements |
 | Cell-ID fallback | `mme/src/location_service.py`, `cell_plan.py` | labelled `CELL_PLAN`, age unknown, no invented age |
 | S1AP codec (TS 36.413) | `lib/codecs/s1ap.py`, generated from the annex | 2e-1 done; message layer only |
-| S1AP / LPPa relay | - | not built; no S1 association, so `eNB` signalling is absent |
+| LPPa codec (TS 36.455) | `lib/codecs/lppa.py`, generated from the annex | 2e-2 done; E-CID procedures and ErrorIndication |
+| S1 association and LPPa relay | `mme/src/s1_link.py`, `corelib/wire.py` | 2e-2 done over TCP; SCTP unverified; no handover, E-RAB or NAS stack |
+| Lab eNB | `mme/src/lab_enb.py` | answers E-CID measurement initiations with the cell plan's position; no radio, no measurements |
 
 Every outcome carries `method`, `source`, `uncertainty_m`, `accuracy_fulfilled`
 (when an accuracy was asked for) and `age_seconds` (when the source knows it).
@@ -51,9 +53,12 @@ row says the existing `tests/test_mme_location.py` covers it.
 | UE answers a different LPP transaction | E-SMLC rejects, cell plan used | 2001 + `CELL_PLAN` | `test_an_answer_for_another_transaction_fails_the_dialogue` |
 | UE aborts LPP | dialogue fails, cell plan used | 2001 + `CELL_PLAN` | `test_a_ue_abort_fails_the_dialogue` |
 | UE reports a position-method failure | dialogue fails, cell plan used | 2001 + `CELL_PLAN` | `test_a_ue_failure_cause_fails_the_dialogue` |
-| More than eight LPP rounds | client aborts the dialogue | 2001 + `CELL_PLAN` | `test_more_than_eight_lpp_rounds_aborts_the_client` |
+| More than eight measurement rounds | client aborts the dialogue (the cap covers LPP and LPPa together) | 2001 + `CELL_PLAN` | `test_more_than_eight_measurement_rounds_aborts_the_client` |
+| E-SMLC asks for LPPa, MME has no S1 binding | Location-Abort, cell plan used | 2001 + `CELL_PLAN` | `test_without_an_s1_binding_the_dialogue_is_aborted` |
+| Serving eNB gone before the LPPa relay | relay refused, Location-Abort, cell plan used | 2001 + `CELL_PLAN` | `test_an_enb_that_has_gone_away_leaves_the_location_to_the_plan` |
+| LPPa procedure with no outcome (e.g. Termination) | relay times out; the MME invents no answer | - | `test_termination_is_recorded_and_answered_by_nothing` |
 | UE context removed mid-dialogue | in-flight request finishes on the cell it started with; the next one is 5001 | 2001, then 5001 | `test_a_context_removed_mid_dialogue_does_not_break_the_live_answer` |
-| Handover mid-request | not signalled: there is no S1AP path yet, so a handover cannot be observed. The context-change test is the closest honest analogue. | - | - |
+| Handover mid-request | not signalled: the S1 link has no handover or path-switch procedure, so a handover cannot be observed. The context-change test is the closest honest analogue. | - | - |
 
 Malformed LPP is still not testable at the MME: the MME is an opaque relay,
 so it neither accepts nor rejects an LPP APDU on its own. The E-SMLC judges
@@ -133,10 +138,77 @@ list entry of the wrong type, an eight-thread concurrency check, and the
 staleness check that regenerates the codec from `asn1/s1ap.asn` and compares
 it byte for byte.
 
-What this is not: there is no S1 association, no S1 setup handshake, no
-paging procedure and no LPPa relay in the MME yet. The codec and message
-layer are the foundation for 2e-2; until that lands the MME still has no eNB
-path, and LPPa (TS 36.455) is not compiled.
+What this was at 2e-1: a codec and message layer with no S1 association, no
+setup handshake, no paging procedure and no LPPa relay. 2e-2, below, adds
+those on top of it.
+
+## 2e-2 S1 association and LPPa relay
+
+TS 36.455 (36545-j20) is compiled from its published docx by
+`lib/codecs/build_lppa.py` into `lib/codecs/asn1/lppa.asn` and
+`lib/codecs/lppa_codec.py` (pycrate 0.8.1). Unlike S1AP, every LPPa PDU
+carries a transaction identifier (0..32767) in its envelope beside the
+procedure code, so `lib/codecs/lppa.py` reads and writes that field rather
+than only the value. The surface is the E-CID procedures a location session
+uses: Measurement Initiation Request/Response/Failure, Failure Indication,
+Measurement Report, Termination Command and ErrorIndication. Two IEs are
+named Measurement-ID (id 2 is the E-SMLC's, id 6 the eNB's); the accessors
+read them by id so a message carrying both is unambiguous. A procedure
+outside the generated object set is refused by number, never named by guess.
+
+`mme/src/s1_link.py` is the association:
+
+| Message | What the MME does |
+|---|---|
+| S1SetupRequest | accepts when a served TAI carries this MME's PLMN, answers S1SetupResponse; otherwise S1SetupFailure |
+| InitialUEMessage | reads a plain EPS Attach Request from the NAS PDU and binds the IMSI (TS 24.301) to the eNB UE S1AP identity; GUTI, IMEI and security-protected attaches bind no IMSI and are counted |
+| Paging | sends by S-TMSI when known, otherwise by the IMSI paging identity and index |
+| Downlink/Uplink UE-associated LPPa | one outstanding relay per UE; the uplink PDU is matched by the routing identity and handed back to the caller |
+| UEContextRelease | releases the UE, marks the context idle |
+| ErrorIndication, unknown procedures | counted, not answered |
+
+The relay is deliberately block-and-wait: the E-SMLC's LPPa request is sent
+on the association thread and the eNB's answer wakes the caller. A second
+relay for the same UE while one is outstanding is refused. A procedure with
+no outcome message - the E-CID Termination Command is one - times out; the
+MME does not invent an answer. A UE with no S1 binding cannot be relayed to:
+the SLs dialogue is aborted with Location-Abort instead of being dropped, so
+the E-SMLC learns the request failed rather than waiting for its own timer.
+
+`mme/src/lab_enb.py` is the eNB half of 2f. It sets up S1, sends one Attach
+Request, and answers an E-CID Measurement Initiation with a Response carrying
+the serving ECGI, TAC and, when the request asks for `cell-ID`, the position
+the operator's cell plan has for that cell. The plan's radius becomes the
+TS 23.032 uncertainty code and the reported confidence is the code's 67%.
+That position is synthetic lab data, not a measurement: the lab eNB has no
+radio, and the module says so. It also records paging and acknowledges a
+release; everything else is counted as unexpected.
+
+`esmlc/src/esmlc_sim.py` gains an opt-in E-CID-over-LPPa mode
+(`ecid_over_lppa=True` or `ESMLC_ECID_LPPA=1`). For a target whose method is
+e-cid it sends an E-CID Measurement Initiation Request over
+Connection-Oriented-Information with Payload-Type `lPPa`, validates the
+response's transaction, procedure, both measurement identities and the
+serving-cell result, and then still answers from its table. The result is
+checked, not used: this harness has no solver, and the answer claims no
+measurement it did not make.
+
+The MME routes strictly on Payload-Type: `lPP` goes to the UE's NAS endpoint,
+`lPPa` to the serving eNB. A missing Payload-Type, an APDU with no transport
+for its type, or a transport that fails ends the dialogue with
+Location-Abort. Tests: `tests/test_nas.py` (24 cases on the Attach Request
+reader), `tests/test_lppa_codec.py` (22 cases: every E-CID PDU, both
+Measurement-ID IEs, transaction bounds, malformed input and the staleness
+check), `tests/test_s1_link.py` (20 cases: setup, binding, relay, paging,
+release, resilience), `tests/test_lab_enb.py` (12 cases) and
+`tests/test_mme_lppa.py` (3 cases through the real MME path).
+
+What this is not: an S1 mobility engine. There is no handover, no E-RAB or
+bearer management, no NAS stack beyond reading a plain Attach Request, no
+authentication or security-mode procedure, and no tracking of whether a
+paged UE answers. The carrier is the D5 TCP stand-in on this host; the SCTP
+path is implemented but has never run. pcap export still waits for Linux
+SCTP.
 
 ## 2f Lab UE
 
@@ -177,9 +249,10 @@ device. Anything else increments `lpp_rejected` and fails the dialogue before
 a location round is attempted. The capability content is discarded: there is
 no method ladder (2d) to feed it into.
 
-What this is not: there is no Uu or NAS stack, no measurement reporting and no
-eNB simulator. The eNB half of 2f needs S1AP/LPPa (2e), which this MME does
-not have.
+What this is not: there is no Uu or NAS stack and no measurement reporting.
+The eNB half of 2f arrived with 2e-2 as `mme/src/lab_enb.py`: it is a real
+S1 peer that answers E-CID from the operator cell plan, not a radio, and it
+measures nothing.
 
 ## 2h soak
 
@@ -305,8 +378,8 @@ and rejected the PLA. Two changes fixed it:
 |---|---|---|
 | 2c A-GNSS assistance and solver | the codec exists, but no assistance generator or orbit/clock model is built | E-SMLC can only answer cell/E-CID from its table |
 | 2d method ladder | no measurements to rank; the table names the method | no fallback ordering among measured methods |
-| 2e S1AP/LPPa relay | the codec and message layer are delivered (2e-1); the MME has no S1 association, setup handshake or relay yet | no eNB measurements, no handover visibility |
-| 2f eNB simulator, measured UE | the UE half is delivered in `lpp_ue.py`; the eNB half needs S1AP/LPPa (2e), and neither reports measurements | the dialogue is real but no measurement ever drives a position |
+| 2e S1 handover, E-RAB, NAS stack | 2e-2 delivered the association and LPPa relay; mobility and bearer management are not built | no handover visibility and no measurement collection beyond E-CID |
+| 2f measured UE and eNB | both halves exist (`lpp_ue.py`, `lab_enb.py`), and neither measures a signal: the UE answers LPP without an estimate and the eNB reports the cell plan's position | the dialogue is real but no measurement ever drives a position |
 | pcap export | see above | byte-level evidence waits for Linux SCTP |
 | SCTP itself | no `AF_SCTP` on this host | D5 SCTP path is implemented but unverified |
 

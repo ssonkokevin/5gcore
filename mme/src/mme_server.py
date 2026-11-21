@@ -6,15 +6,20 @@ What this process is:
     and Device-Watchdog and answers Provide-Location-Request with a position,
     or with an honest failure result code;
   * an SLs client (LCS-AP, TS 29.171) that asks the E-SMLC for the position
-    and relays any LPP APDU to the UE's NAS endpoint unchanged;
+    and relays an LPP APDU to the UE's NAS endpoint and an LPPa APDU to the
+    serving eNB over S1, both unchanged;
+  * an S1 association server (S1AP, TS 36.413) that accepts a lab eNB's S1
+    setup, learns the IMSI behind its UE from the NAS Attach Request, pages a
+    known UE and releases its context;
   * a paging model and a Cell-ID fallback from the operator's cell plan;
   * a management HTTP API on 8075 exposing listener state, a lab UE registry
     and an SLg shim used by the test suite.
 
-What this process is not: S1AP, S11, S6a, SGs, bearer management, LPP or LPPa
-codecs, or MAP LCS. A UE cannot attach to this MME; the lab API seeds the UE
-contexts that S1AP would otherwise create. LRR/LRA (location reporting) is a
-Phase 4 work package and is refused rather than dropped.
+What this process is not: S11, S6a, SGs, bearer management, a NAS stack, or
+MAP LCS. The S1 support is an association and LPPa relay for E-CID, not a
+mobility engine: there is no handover, no E-RAB and no security-mode
+procedure. LRR/LRA (location reporting) is a Phase 4 work package and is
+refused rather than dropped.
 """
 
 from __future__ import annotations
@@ -35,9 +40,11 @@ for _p in (os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
         sys.path.insert(0, _p)
 from corelib import diameter as d  # noqa: E402
 from corelib import sls  # noqa: E402
+from corelib import wire  # noqa: E402
 from lib.codecs import lcsap  # noqa: E402
 
 import cell_plan as cell_plan_module  # noqa: E402
+import s1_link  # noqa: E402
 import slg  # noqa: E402
 import ue_contexts  # noqa: E402
 from location_service import LocationService  # noqa: E402
@@ -61,6 +68,10 @@ ESMLC_HOST = os.getenv("ESMLC_ADDR", "127.0.0.1")
 ESMLC_PORT = int(os.getenv("ESMLC_PORT", "9082"))
 ESMLC_TIMEOUT = float(os.getenv("MME_ESMLC_TIMEOUT", "5.0"))
 SLS_CARRIER = os.getenv("MME_SLS_CARRIER", sls.CARRIER_TCP)
+S1_PORT = int(os.getenv("MME_S1_PORT", str(s1_link.DEFAULT_S1_PORT)))
+S1_CARRIER = os.getenv("MME_S1_CARRIER", sls.CARRIER_TCP)
+S1_ENABLE = os.getenv("MME_S1_ENABLE", "1").lower() in ("1", "true", "yes")
+S1_LPPA_TIMEOUT = float(os.getenv("MME_S1_LPPA_TIMEOUT", "5.0"))
 CELL_PLAN_PATH = os.getenv("MME_CELL_PLAN", str(cell_plan_module.DEFAULT_CONFIG))
 LAB_MCC = os.getenv("MME_LAB_MCC", "001")
 LAB_MNC = os.getenv("MME_LAB_MNC", "01")
@@ -97,15 +108,28 @@ def _seed_store() -> ue_contexts.UeContextStore:
 
 
 CONTEXTS = _seed_store()
+
+diameter_server: Optional[d.DiameterServer] = None
+s1_server: Optional[s1_link.S1Server] = None
+
+
+def _lppa_transport(imsi: str):
+    """The E-SMLC's LPPa APDU goes to the eNB that serves this IMSI, or
+    nowhere: without an S1 binding the dialogue is aborted, not faked."""
+    server = s1_server
+    if server is None:
+        return None
+    return lambda apdu: server.relay_lppa(imsi, apdu)
+
+
 LOCATION = LocationService(
     CONTEXTS, CELL_PLAN,
     esmlc_host=ESMLC_HOST, esmlc_port=ESMLC_PORT,
-    timeout=ESMLC_TIMEOUT, carrier=SLS_CARRIER)
+    timeout=ESMLC_TIMEOUT, carrier=SLS_CARRIER,
+    lppa_transport_factory=_lppa_transport)
 
 stats = {"plr": 0, "unsupported": 0, "bad_realm": 0, "reporting_refused": 0,
          "last_plr": None}
-
-diameter_server: Optional[d.DiameterServer] = None
 
 
 def _capabilities_answer(request: d.Message) -> d.Message:
@@ -223,13 +247,29 @@ class LabUeRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global diameter_server
+    global diameter_server, s1_server
     diameter_server = d.DiameterServer(HOST, SLG_PORT, handle_message, name="mme-slg")
     await diameter_server.start()
+    if S1_ENABLE:
+        candidate = s1_link.S1Server(HOST, S1_PORT, CONTEXTS, name="mme",
+                                     carrier=S1_CARRIER,
+                                     lppa_timeout=S1_LPPA_TIMEOUT)
+        try:
+            candidate.start()
+            s1_server = candidate
+        except (OSError, wire.WireError) as exc:
+            # The location function still works without S1; only LPPa relay
+            # to an eNB is lost, and the health endpoint says so.
+            logger.error("S1 endpoint on %s:%s could not start (%s); "
+                         "LPPa relay is unavailable", HOST, S1_PORT, exc)
     logger.info("MME management API on %s:%s; %d UE contexts, %d planned cells, "
-                "E-SMLC %s:%s over %s", HOST, HTTP_PORT, len(CONTEXTS),
-                len(CELL_PLAN), ESMLC_HOST, ESMLC_PORT, SLS_CARRIER)
+                "E-SMLC %s:%s over %s, S1 %s", HOST, HTTP_PORT, len(CONTEXTS),
+                len(CELL_PLAN), ESMLC_HOST, ESMLC_PORT, SLS_CARRIER,
+                f"{HOST}:{S1_PORT} ({S1_CARRIER})" if s1_server else "off")
     yield
+    if s1_server is not None:
+        s1_server.stop()
+        s1_server = None
     await diameter_server.stop()
 
 
@@ -241,18 +281,30 @@ def health():
     return {
         "status": "ok",
         "service": "mme",
-        "scope": "LCS function (SLg + SLs)",
-        "s1ap": "not implemented",
+        "scope": "LCS function (SLg + SLs + S1 LPPa relay)",
+        "s1ap": {
+            "association": "S1 setup, InitialUEMessage, paging, release",
+            "lppa": "UE-associated LPPa relay to the serving eNB; the lab eNB answers E-CID",
+            "not_implemented": ["handover", "E-RAB setup", "NAS stack", "security mode"],
+            "enabled": S1_ENABLE,
+            "listening": s1_server is not None,
+        },
         "s11": "not implemented",
         "s6a": "not implemented",
         "sgs": "not implemented",
-        "lpp": "relayed opaquely over the lab NAS endpoint (TS 37.355 codec pending)",
-        "paging": "modelled for lab UEs only (no S1-MME)",
+        "lpp": ("relayed opaquely over the lab NAS endpoint; the E-SMLC and "
+                "lab UE speak TS 37.355, the MME does not decode it"),
+        "lppa": "relayed to the serving eNB over S1; E-CID only",
+        "paging": ("over S1 by S-TMSI or IMSI for UEs with an S1 context; the "
+                   "MME sends the page and does not invent the UE's answer"),
         "sls": {
             "esmlc": f"{ESMLC_HOST}:{ESMLC_PORT}",
             "carrier": SLS_CARRIER,
             "timeout_s": ESMLC_TIMEOUT,
         },
+        "s1": (s1_server.status() if s1_server is not None else {
+            "listening": False, "enabled": S1_ENABLE,
+            "host": HOST, "port": S1_PORT, "carrier": S1_CARRIER}),
         "cell_plan": {"path": str(CELL_PLAN_PATH), "cells": len(CELL_PLAN)},
         "ue_contexts": len(CONTEXTS),
         "diameter": {
@@ -332,9 +384,42 @@ async def slg_plr_shim(request: SlgShimRequest) -> Dict[str, Any]:
         "age_seconds": age.as_uint32() if age else None,
         "ecgi": ecgi.as_octets()[:7].hex() if ecgi else None,
         "lpp_rounds": last.get("lpp_rounds"),
+        "lppa_rounds": last.get("lppa_rounds"),
         "reached_by": last.get("reached_by"),
         "detail": last.get("detail"),
     }
+
+
+@app.get("/s1/status")
+def s1_status() -> Dict[str, Any]:
+    if s1_server is None:
+        return {"listening": False, "enabled": S1_ENABLE, "host": HOST,
+                "port": S1_PORT, "carrier": S1_CARRIER,
+                "detail": "the S1 listener is not running; LPPa relay is unavailable"}
+    return s1_server.status()
+
+
+@app.get("/s1/enbs")
+def s1_enbs() -> Dict[str, Any]:
+    enbs = s1_server.enbs() if s1_server is not None else []
+    return {"count": len(enbs), "enbs": enbs}
+
+
+@app.get("/s1/ues")
+def s1_ues() -> Dict[str, Any]:
+    ues = s1_server.ues() if s1_server is not None else []
+    return {"count": len(ues), "ues": ues}
+
+
+@app.post("/s1/page/{imsi}")
+def s1_page(imsi: str) -> Dict[str, Any]:
+    """Send one S1 paging message. Reaching the UE is then the radio's job."""
+    if s1_server is None:
+        raise HTTPException(status_code=503, detail="the S1 listener is not running")
+    try:
+        return s1_server.page(imsi)
+    except s1_link.S1LinkError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.get("/lab/ue")
@@ -371,15 +456,18 @@ def scope() -> Dict[str, Any]:
             "Diameter SLg over TCP (PLR/PLA, CER/CEA, DWR/DWA)",
             "SLs LCS-AP client (Location-Request/Response, Reset, Abort)",
             "LPP APDU relay over the lab NAS endpoint (opaque, unmodified)",
-            "Paging model and Cell-ID fallback from the operator cell plan",
+            "S1AP association: S1 setup, InitialUEMessage (IMSI from a plain Attach Request), paging, UE context release",
+            "UE-associated LPPa relay to the serving eNB (Payload-Type lPPa)",
+            "Paging and Cell-ID fallback from the operator cell plan",
             "Lab UE registry and SLg shim on the management API",
         ],
         "not_implemented": [
-            "S1AP / S1-MME",
+            "S1AP handover, E-RAB management, S1 paging response tracking",
             "S11 (SGW-C), S6a (HSS), SGs (MSC)",
             "MAP LCS SLR/SLA (MSC side)",
-            "UE attach, bearer management; paging is modelled only",
-            "LPP codec (TS 37.355) and LPPa over S1AP",
+            "EPS NAS stack (only a plain Attach Request is read, for the IMSI)",
+            "Security mode, authentication; GUTI/IMEI attaches bind no IMSI",
+            "LPP codec (TS 37.355); LPPa beyond E-CID measurement initiation",
             "SLg LRR/LRA location reporting (Phase 4)",
         ],
         "note": "MSC with MAP LCS is not built; see docs/STAGING_AND_CORE_BUILD_PLAN.txt",

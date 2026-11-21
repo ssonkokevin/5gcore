@@ -18,6 +18,13 @@ transaction, exactly as a real location server would: a UE must say what it
 supports before it is asked to measure. The answer is validated for body and
 transaction and then discarded, because no method ladder exists to use it.
 
+With ``ecid_over_lppa`` a target whose method is e-cid asks the serving eNB
+over LPPa (TS 36.455) instead of the UE over LPP: the simulator sends an
+E-CID Measurement Initiation Request and validates the Measurement Initiation
+Response it gets back. The response is checked, not used: as with LPP, the
+configured table remains the only position source, so the answer claims no
+measurement this harness did not make.
+
 Every configured coordinate is synthetic. The file says so as well.
 """
 
@@ -37,7 +44,7 @@ for _p in (os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")),
         sys.path.insert(0, _p)
 
 from corelib import sls  # noqa: E402
-from lib.codecs import lcsap, lpp  # noqa: E402
+from lib.codecs import lcsap, lpp, lppa  # noqa: E402
 
 logger = logging.getLogger("esmlc")
 
@@ -112,10 +119,12 @@ class EsmlcSimulator:
                  port: int = sls.DEFAULT_SLS_PORT,
                  carrier: str = sls.CARRIER_TCP, lpp_timeout: float = 3.0,
                  capability_exchange: bool = False,
+                 ecid_over_lppa: bool = False,
                  name: str = "esmlc-sim"):
         self.table = table
         self.lpp_timeout = lpp_timeout
         self.capability_exchange = capability_exchange
+        self.ecid_over_lppa = ecid_over_lppa
         self.server = sls.SlsServer(host, port, self.handle, name=name,
                                     carrier=carrier)
         self.counters: Dict[str, int] = {
@@ -127,6 +136,8 @@ class EsmlcSimulator:
             "lpp_capabilities": 0,
             "lpp_rounds": 0,
             "lpp_rejected": 0,
+            "lppa_rounds": 0,
+            "lppa_rejected": 0,
             "unreadable": 0,
         }
         self.last: Optional[dict] = None
@@ -181,9 +192,15 @@ class EsmlcSimulator:
             return lcsap.location_response(
                 correlation, None, cause=("misc", "unspecified"))
 
-        if not self._relay_lpp(correlation, target, connection):
+        if self.ecid_over_lppa and target.method == lcsap.METHOD_E_CID:
+            answered = self._relay_lppa(correlation, connection)
+            failed_result = "lppa-dialogue-failed"
+        else:
+            answered = self._relay_lpp(correlation, target, connection)
+            failed_result = "lpp-dialogue-failed"
+        if not answered:
             self.last = {"correlation": correlation.hex(),
-                         "result": "lpp-dialogue-failed", "cell": cell}
+                         "result": failed_result, "cell": cell}
             return lcsap.location_response(
                 correlation, None,
                 cause=("protocol", "message-Not-Compatible-With-Receiver-State"))
@@ -253,13 +270,14 @@ class EsmlcSimulator:
         return True
 
     def _transact(self, correlation: bytes, request: bytes,
-                  connection: sls.SlsConnection,
-                  counter: str) -> Optional[bytes]:
-        """Carry one LPP APDU to the UE and return its APDU, or None when the
-        envelope never came back. A peer that closes, times out or answers
-        LCS-AP with the wrong correlation or no APDU fails the round."""
+                  connection: sls.SlsConnection, counter: str,
+                  payload_type: str = lcsap.PAYLOAD_LPP) -> Optional[bytes]:
+        """Carry one APDU to the peer named by Payload-Type and return its
+        APDU, or None when the envelope never came back. A peer that closes,
+        times out or answers LCS-AP with the wrong correlation, the wrong
+        Payload-Type or no APDU fails the round."""
         connection.send(lcsap.connection_oriented_information(
-            correlation, request))
+            correlation, request, payload_type=payload_type))
         self.counters[counter] += 1
         try:
             reply = connection.receive(self.lpp_timeout)
@@ -273,11 +291,47 @@ class EsmlcSimulator:
             answer = lcsap.parse(reply)
         except lcsap.LcsApError:
             return None
+        if (answer.procedure == lcsap.PROC_LOCATION_ABORT
+                and answer.kind == lcsap.INITIATING):
+            self.counters["aborts"] += 1  # the MME gave up mid-dialogue
+            return None
         if (answer.procedure != lcsap.PROC_CONNECTION_ORIENTED_INFORMATION
                 or lcsap.correlation_id(answer) != correlation
+                or lcsap.payload_type(answer) != payload_type
                 or lcsap.lpp_apdu(answer) is None):
             return None
         return lcsap.lpp_apdu(answer)
+
+    def _relay_lppa(self, correlation: bytes,
+                    connection: sls.SlsConnection) -> bool:
+        """Ask the serving eNB for E-CID measurements over LPPa. The answer
+        must be a Measurement Initiation Response for this transaction with
+        the eNB's measurement identity and the serving cell's result. That
+        result is validated, not used: the table stays the only source of a
+        position, so nothing here claims a measurement was made."""
+        esmlc_id = 1
+        number = correlation[-1]
+        request = lppa.measurement_initiation_request(
+            number, esmlc_id, report_characteristics="onDemand",
+            quantities=("cell-ID",))
+        apdu = self._transact(correlation, request, connection, "lppa_rounds",
+                              payload_type=lcsap.PAYLOAD_LPPA)
+        if apdu is None:
+            return False
+        try:
+            answer = lppa.parse(apdu)
+        except lppa.LppaError:
+            self.counters["lppa_rejected"] += 1
+            return False
+        if (answer.kind != lppa.SUCCESSFUL
+                or answer.transaction_id != number
+                or answer.name != "E-CIDMeasurementInitiationResponse"
+                or lppa.esmlc_measurement_id(answer) != esmlc_id
+                or lppa.enb_measurement_id(answer) is None
+                or lppa.measurement_result(answer) is None):
+            self.counters["lppa_rejected"] += 1
+            return False
+        return True
 
     def _accept_lpp_answer(self, apdu: bytes, number: int) -> bool:
         try:
@@ -332,6 +386,8 @@ def main() -> None:
         lpp_timeout=float(os.getenv("ESMLC_LPP_TIMEOUT", "3.0")),
         capability_exchange=os.getenv(
             "ESMLC_CAPABILITY_EXCHANGE", "").lower() in ("1", "true", "yes"),
+        ecid_over_lppa=os.getenv(
+            "ESMLC_ECID_LPPA", "").lower() in ("1", "true", "yes"),
     )
     sim.start()
     logger.info("E-SMLC simulator: %d synthetic targets, carrier %s",

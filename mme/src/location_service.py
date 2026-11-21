@@ -4,9 +4,14 @@ The order of operations mirrors what a real MME does:
 
   1. find the UE context (the UE must be known to this MME);
   2. make it reachable (page it when idle);
-  3. ask the E-SMLC over SLs, relaying any LPP APDU to the UE;
+  3. ask the E-SMLC over SLs, relaying an LPP APDU to the UE over NAS and an
+     LPPa APDU to the serving eNB over S1AP, as the Payload-Type says;
   4. when the E-SMLC cannot produce a position, fall back to Cell-ID
      positioning from the operator's cell plan.
+
+LPPa relay needs an S1 association with the UE's serving eNB. Without one the
+LPPa transport factory returns None and an E-SMLC that asks for LPPa gets an
+aborted dialogue rather than a silently ignored request.
 
 The fallback is labelled as such. Every outcome carries a method, a source,
 an uncertainty and, when one was asked for, an accuracy verdict; there is no
@@ -32,7 +37,7 @@ from corelib import sls  # noqa: E402
 from lib.codecs import lcsap  # noqa: E402
 
 from cell_plan import CellPlan  # noqa: E402
-from lcsap_client import LcsApClient, LcsApClientError  # noqa: E402
+from lcsap_client import LcsApClient, LcsApClientError, LppTransport  # noqa: E402
 from nas_relay import HttpNasLink  # noqa: E402
 from ue_contexts import UeContext, UeContextStore  # noqa: E402
 
@@ -57,6 +62,7 @@ class LocationOutcome:
     cell: Optional[int] = None
     plmn: Optional[bytes] = None
     lpp_rounds: int = 0
+    lppa_rounds: int = 0
     reached_by: str = ""
 
     def as_dict(self) -> dict:
@@ -74,6 +80,7 @@ class LocationOutcome:
             "cell": None if self.cell is None else f"0x{self.cell:07X}",
             "plmn": None if self.plmn is None else self.plmn.hex(),
             "lpp_rounds": self.lpp_rounds,
+            "lppa_rounds": self.lppa_rounds,
             "reached_by": self.reached_by,
         }
 
@@ -82,7 +89,9 @@ class LocationService:
     def __init__(self, contexts: UeContextStore, plan: CellPlan, *,
                  esmlc_host: str, esmlc_port: int = sls.DEFAULT_SLS_PORT,
                  timeout: float = 5.0, carrier: str = sls.CARRIER_TCP,
-                 client_factory: Callable[..., LcsApClient] = LcsApClient):
+                 client_factory: Callable[..., LcsApClient] = LcsApClient,
+                 lppa_transport_factory: Optional[
+                     Callable[[str], Optional[LppTransport]]] = None):
         self.contexts = contexts
         self.plan = plan
         self.esmlc_host = esmlc_host
@@ -90,6 +99,7 @@ class LocationService:
         self.timeout = timeout
         self.carrier = carrier
         self._client_factory = client_factory
+        self._lppa_transport_factory = lppa_transport_factory
         self._lock = threading.Lock()
         self._correlation = 0
         self.counters: Dict[str, int] = {
@@ -129,6 +139,7 @@ class LocationService:
         correlation = self._next_correlation()
         transport = (HttpNasLink(context.nas_url, context.imsi)
                      if context.nas_url else None)
+        lppa_transport = self._lppa_transport(imsi)
         failure = ""
         try:
             with self._client_factory(
@@ -139,7 +150,8 @@ class LocationService:
                     imsi=lcsap.tbcd(imsi), plmn=context.plmn,
                     client_type=client_type,
                     horizontal_accuracy_m=accuracy_m,
-                    lpp_transport=transport)
+                    lpp_transport=transport,
+                    lppa_transport=lppa_transport)
         except (LcsApClientError, OSError) as exc:
             failure = str(exc)
             result = None
@@ -158,7 +170,8 @@ class LocationService:
                 radius_m=result.circle.uncertainty_m,
                 method=method, source=SOURCE_SLS, fulfilled=fulfilled,
                 age_seconds=0, cell=context.cell, plmn=context.plmn,
-                lpp_rounds=result.lpp_rounds, reached_by=reached_by)
+                lpp_rounds=result.lpp_rounds,
+                lppa_rounds=result.lppa_rounds, reached_by=reached_by)
             self._remember(outcome)
             return outcome
 
@@ -192,6 +205,11 @@ class LocationService:
             radius_m=float(cell.radius_m), method="cell-id",
             source=SOURCE_CELL_PLAN, fulfilled=fulfilled, age_seconds=None,
             cell=context.cell, plmn=context.plmn, reached_by=reached_by)
+
+    def _lppa_transport(self, imsi: str) -> Optional[LppTransport]:
+        if self._lppa_transport_factory is None:
+            return None
+        return self._lppa_transport_factory(imsi)
 
     def _next_correlation(self) -> bytes:
         with self._lock:

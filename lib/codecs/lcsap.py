@@ -316,6 +316,12 @@ def lpp_apdu(message: LcsApMessage) -> Optional[bytes]:
     return message.ie("APDU")
 
 
+def payload_type(message: LcsApMessage) -> Optional[str]:
+    """Which interface the APDU belongs to: lPP for the UE over NAS, lPPa for
+    the eNB over S1AP. The MME routes on this, never on the APDU's content."""
+    return message.ie("Payload-Type")
+
+
 def positioning_data(message: LcsApMessage) -> Optional[int]:
     """The first positioning-method octet, or None when the response carries
     no Positioning-Data. Later methods in the set are not merged."""

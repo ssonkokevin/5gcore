@@ -68,8 +68,11 @@ class MME(unittest.TestCase):
 
     def test_health_states_what_is_missing(self):
         body = self.client.get("/health").json()
-        self.assertEqual(body["scope"], "LCS function (SLg + SLs)")
-        self.assertEqual(body["s1ap"], "not implemented")
+        self.assertEqual(body["scope"], "LCS function (SLg + SLs + S1 LPPa relay)")
+        self.assertEqual(body["s1ap"]["association"],
+                         "S1 setup, InitialUEMessage, paging, release")
+        self.assertIn("handover", body["s1ap"]["not_implemented"])
+        self.assertIn("NAS stack", body["s1ap"]["not_implemented"])
         self.assertEqual(body["lpp"][:8], "relayed ")
         self.assertIn("esmlc", body["sls"])
         self.assertFalse(body["ue_attach"] if "ue_attach" in body else False)
@@ -134,7 +137,10 @@ class MME(unittest.TestCase):
         body = self.client.get("/scope").json()
         joined = " ".join(body["not_implemented"]).lower()
         self.assertIn("s1ap", joined)
+        self.assertIn("handover", joined)
         self.assertIn("map lcs", joined)
+        implemented = " ".join(body["implemented"]).lower()
+        self.assertIn("lppa relay", implemented)
 
     def test_diameter_tcp_round_trip(self):
         try:

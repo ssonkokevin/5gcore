@@ -25,7 +25,7 @@ talk over standard 3GPP interfaces only.
 | UPF/PGW | Python datapath stub + DPE/CPE configs | 2152, 8805, 42050 | Unified PGW/UPF datapath scaffold |
 | AMF | Python SBI proxy | 8001 | NRF registration, Namf_Location to the LMF; no NGAP |
 | LMF | Python SBI | 8003 | Nlmf_Location to a configured provider; 501 without one |
-| MME | Python Diameter SLg | 3875, 8075 | LCS function only: PLR answered 5012; no S1AP/S11/S6a |
+| MME | Python Diameter SLg + S1 | 3875, 8075, 36412 | LCS function: SLg/SLs, S1 association with an LPPa relay (E-CID); no handover, S11 or S6a |
 | E-SMLC | - | 9082 | **Not built yet** - this is the current work |
 | GMLC | Java/Spring, separate repo | 8082 | Le API, MAP and Diameter towards HLR/HSS/MME |
 | OAM | Placeholder service | 8081 | Operations & maintenance |

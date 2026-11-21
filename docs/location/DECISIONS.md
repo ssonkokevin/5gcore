@@ -307,3 +307,29 @@ one thing every cell-ID result depends on.
 
 **Why.** Mixed time bases and coordinate rounding are the two most common
 sources of "the location is 300 m off and nobody knows why".
+
+---
+
+## D17. The S1 relay is block-and-wait and routes on Payload-Type
+
+**Decision.** The MME's S1 link (`mme/src/s1_link.py`) serves LPPa only. It
+binds a UE by decoding a plain EPS Attach Request from InitialUEMessage,
+allows one outstanding LPPa relay per UE, and hands the eNB's uplink PDU back
+to the waiting caller. SLs Connection-Oriented-Information is routed by its
+Payload-Type: `lPP` to the UE's NAS endpoint, `lPPa` to the eNB. A missing
+Payload-Type, an APDU with no transport for its type, or a transport failure
+ends the dialogue with Location-Abort.
+
+**Why.** E-CID is request/response and the location service is synchronous;
+a queue would add state with no consumer. Routing on Payload-Type rather than
+on the APDU's bytes keeps the MME ignorant of TS 36.455/TS 37.355 content,
+which is why the LPP codec could be added later without touching the relay.
+
+**Rules out.** An LPPa procedure with no outcome message being answered
+inventively (the E-CID Termination Command times out), an unmatched uplink
+PDU being attached to the wrong UE, and a second concurrent relay silently
+queuing behind the first.
+
+**Not decided here.** Handover, E-RAB management and tracking whether a paged
+UE answers are outside this link; they belong to an EMM/mobility layer that
+does not exist yet. The SCTP carrier is implemented but unverified (D5).
