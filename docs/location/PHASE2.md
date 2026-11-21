@@ -1,9 +1,9 @@
 # Phase 2 checkpoint - the 4G E-SMLC path
 
-Date: 2026-11-21. Status: 2a, 2b and the MME half of 2e delivered; 2c, 2d,
-2f, the S1AP half of 2e and the pcap export are open. This note is the
-evidence for PLAN 2g/2h and the honest list of what a Phase 2 request can and
-cannot do today.
+Date: 2026-11-21. Status: 2a, 2b, the MME half of 2e and the UE half of 2f
+delivered; 2c, 2d, the S1AP half of 2e, the eNB half of 2f and the pcap
+export are open. This note is the evidence for PLAN 2g/2h and the honest list
+of what a Phase 2 request can and cannot do today.
 
 Everything here runs on the Windows development host over the D5 TCP carrier,
 with in-process simulators. No SCTP association, Docker, MariaDB or radio has
@@ -16,10 +16,11 @@ been exercised. Coordinates are synthetic for lab PLMN 001-01.
 | LCS-AP codec (TS 29.171) | `lib/codecs/lcsap.py`, generated from the annex | 2a done |
 | LPP codec (TS 37.355) | `lib/codecs/lpp.py`, generated from the annex | 2b done; broadcast module compiled, not used yet |
 | SLs listener/client, reset and abort | `corelib/sls.py`, `mme/src/lcsap_client.py` | 2a done over TCP; SCTP unverified |
-| Lab E-SMLC | `esmlc/src/esmlc_sim.py` | sends real LPP and validates the answer; answers from a fixed table; no positioning engine |
+| Lab E-SMLC | `esmlc/src/esmlc_sim.py` | sends real LPP and validates the answer; opt-in RequestCapabilities exchange; answers from a fixed table; no positioning engine |
 | MME SLg server | `mme/src/mme_server.py` | PLR/PLA, RIR/RIA; LRR/LRA refused with 5012 (Phase 4) |
 | MME UE contexts and paging | `mme/src/ue_contexts.py` | connected, idle+answers, idle+ignores; lab seeding endpoint |
 | LPP NAS relay | `mme/src/lcsap_client.py`, `nas_relay.py` | MME relays opaquely; the E-SMLC and lab UE speak TS 37.355 |
+| Lab UE | `esmlc/src/lpp_ue.py` | six LPP behaviours behind an HTTP endpoint; answers real TS 37.355, no measurements |
 | Cell-ID fallback | `mme/src/location_service.py`, `cell_plan.py` | labelled `CELL_PLAN`, age unknown, no invented age |
 | S1AP / LPPa transport | - | not built; `eNB` signalling is absent |
 
@@ -97,6 +98,49 @@ from the target device, with no failure cause. The UE's estimate, if it sends
 one, is not used: the table remains the only position source until the
 assistance and solver work packages land.
 
+## 2f Lab UE
+
+`esmlc/src/lpp_ue.py` is the target-device half of the dialogue. It decodes
+the relayed APDU with the 2b codec and answers as a target device:
+RequestCapabilities gets an empty ProvideCapabilities, and
+RequestLocationInformation gets a ProvideLocationInformation that mirrors the
+request's transaction and endTransaction, optionally carrying a configured
+uncertainty circle. A request it does not implement, or an APDU it cannot
+decode, gets no answer rather than an invented one.
+
+Six behaviours make the failure paths callable instead of a hand-written
+lambda in each test:
+
+| Behaviour | Answer |
+|---|---|
+| `answer` | ProvideLocationInformation in the same transaction |
+| `ignore` | nothing; the peer's timer decides |
+| `abort` | Abort, cause targetDeviceAbort |
+| `failure` | ProvideLocationInformation, cause positionMethodFailure |
+| `error` | Error, cause incorrectDataValue |
+| `wrong-transaction` | a valid answer under number+1 (configurable) |
+
+`UeEndpoint` puts a LabUe behind the same `POST {"imsi","apdu"}` seam the
+MME's NAS relay already uses: a hex `{"apdu"}` reply, or 204 for silence, and
+it keeps the decoded posts for assertions. `tests/test_lpp_ue.py` covers every
+behaviour, the argument bounds, the HTTP face (200/204/400), answer mirroring
+and the capability exchange below. The MME tests and the soak now share this
+UE instead of each keeping a copy.
+
+Capability exchange is opt-in on both surfaces: `EsmlcSimulator(...,
+capability_exchange=True)` or `ESMLC_CAPABILITY_EXCHANGE=1` for the
+standalone simulator, and `--capability-exchange` for the soak with the LPP
+target. The dialogue then opens with RequestCapabilities under the
+correlation's last octet, the location rounds shift by one, and the answer
+must be a ProvideCapabilities for the same transaction from the target
+device. Anything else increments `lpp_rejected` and fails the dialogue before
+a location round is attempted. The capability content is discarded: there is
+no method ladder (2d) to feed it into.
+
+What this is not: there is no Uu or NAS stack, no measurement reporting and no
+eNB simulator. The eNB half of 2f needs S1AP/LPPa (2e), which this MME does
+not have.
+
 ## 2h soak
 
 Command:
@@ -142,15 +186,15 @@ serialised with one lock (`lib/codecs/lcsap.py`), covered by
 ### With the LPP dialogue (2b)
 
 `python tools/soak_lcs.py --target lpp` uses the two-round target
-(001010000000002, cell 0x00A1B2D) and a local HTTP UE that answers each
-request with a real TS 37.355 ProvideLocationInformation. The simulator's UE
-timer is 3 s here, because every answer crosses an HTTP round trip; at 1 s
-this host occasionally expired the timer under eight-way concurrency.
+(001010000000002, cell 0x00A1B2D) and the 2f lab UE behind its HTTP endpoint,
+so every round is a real TS 37.355 exchange. The simulator's UE timer is 3 s
+here, because every answer crosses an HTTP round trip; at 1 s this host
+occasionally expired the timer under eight-way concurrency.
 
 ```
-target             lpp, 2 LPP round(s) per request
+target             lpp, 2 LPP round(s) per request, capabilities off
 requests           10000 at concurrency 8
-elapsed            339.89s (29/s)
+elapsed            222.02s (45/s)
 positioned         10000
 sources            {'SLS': 10000}
 fell back          0
@@ -159,13 +203,40 @@ without metadata   0
 stale SLS age      0
 SLs connections    10000 opened, 0 open at the end (drained: True)
 simulator          requests=10000 positioned=10000 unreadable=0 handler_errors=0
-LPP dialogue       rounds=20000 rejected=0
+LPP dialogue       capabilities=0 rounds=20000 rejected=0
 UE contexts left   1
 result             PASS
 ```
 
 Every request spent two LPP rounds and none was rejected, so the codec
 survived 20,000 concurrent encodes and decodes with no corrupted transaction.
+
+### With the capability exchange (2f)
+
+`--capability-exchange` adds a RequestCapabilities transaction ahead of each
+dialogue, so a request is three LPP messages instead of two:
+
+```
+target             lpp, 2 LPP round(s) per request, capabilities on
+requests           1000 at concurrency 8
+elapsed            17.19s (58/s)
+positioned         1000
+sources            {'SLS': 1000}
+fell back          0
+failures           0
+without metadata   0
+stale SLS age      0
+SLs connections    1000 opened, 0 open at the end (drained: True)
+simulator          requests=1000 positioned=1000 unreadable=0 handler_errors=0
+LPP dialogue       capabilities=1000 rounds=2000 rejected=0
+UE contexts left   1
+result             PASS
+```
+
+One capability transaction and two location rounds per request, none
+rejected, every association drained. The run was cut to 1,000 because the
+purpose was the new code path, not throughput; 58/s with eight-way HTTP
+concurrency is consistent with the two-round figure.
 
 ## No pcap yet, and why
 
@@ -195,7 +266,7 @@ and rejected the PLA. Two changes fixed it:
 | 2c A-GNSS assistance and solver | the codec exists, but no assistance generator or orbit/clock model is built | E-SMLC can only answer cell/E-CID from its table |
 | 2d method ladder | no measurements to rank; the table names the method | no fallback ordering among measured methods |
 | 2e S1AP/LPPa relay | no S1AP stack in this MME | no eNB measurements, no handover visibility |
-| 2f UE/eNB simulators | the lab UE answers LPP over HTTP; there is no Uu/NAS stack or measurement reporting | the dialogue is real but the UE is a stub |
+| 2f eNB simulator, measured UE | the UE half is delivered in `lpp_ue.py`; the eNB half needs S1AP/LPPa (2e), and neither reports measurements | the dialogue is real but no measurement ever drives a position |
 | pcap export | see above | byte-level evidence waits for Linux SCTP |
 | SCTP itself | no `AF_SCTP` on this host | D5 SCTP path is implemented but unverified |
 

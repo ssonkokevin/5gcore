@@ -24,6 +24,7 @@ from lib.codecs import lcsap, lpp  # noqa: E402
 
 import esmlc_sim  # noqa: E402
 from lcsap_client import LcsApClient, LcsApClientError  # noqa: E402
+from lpp_ue import LabUe  # noqa: E402
 
 CORR = b"\x00\x00\x00\x07"
 CELL = (0x00A1B2C, 28)
@@ -31,15 +32,7 @@ CELL_ONLY = (0x00A1B2E, 28)
 UNKNOWN_CELL = (0x00FFFFFF, 28)
 IMSI = lcsap.tbcd("001010000000001")
 IMSI_TWO = lcsap.tbcd("001010000000002")
-
-
-def lpp_answer(apdu, *, failure=None):
-    """A UE answering a relayed RequestLocationInformation in the same
-    transaction, with no location estimate of its own."""
-    asked = lpp.parse(apdu)
-    return lpp.provide_location_information(
-        failure=failure, initiator=lpp.INITIATOR_TARGET_DEVICE,
-        transaction_number=asked.transaction_id.number)
+UE = LabUe()
 
 
 def wait_until(predicate, seconds=2.0):
@@ -76,7 +69,7 @@ class AgainstTheSimulator(unittest.TestCase):
 
         def relay(apdu):
             tokens.append(apdu)
-            return lpp_answer(apdu)
+            return UE.answer(apdu)
 
         result = self.locate(imsi=IMSI, horizontal_accuracy_m=50,
                              lpp_transport=relay)
@@ -114,12 +107,12 @@ class AgainstTheSimulator(unittest.TestCase):
         tokens = []
         result = self.locate(
             imsi=IMSI, horizontal_accuracy_m=20,
-            lpp_transport=lambda apdu: tokens.append(apdu) or lpp_answer(apdu))
+            lpp_transport=lambda apdu: tokens.append(apdu) or UE.answer(apdu))
         self.assertEqual(result.fulfilled, lcsap.ACCURACY_NOT_FULFILLED)
 
     def test_imsi_is_preferred_over_the_cell(self):
         result = self.locate(imsi=IMSI_TWO, cell_id=CELL,
-                             lpp_transport=lpp_answer)
+                             lpp_transport=UE.answer)
         self.assertAlmostEqual(result.circle.latitude, 0.313600, places=4)
         self.assertEqual(lcsap.positioning_method(result.method)[0], "otdoa")
         self.assertEqual(result.lpp_rounds, 2)
@@ -145,7 +138,7 @@ class AgainstTheSimulator(unittest.TestCase):
 
     def test_the_simulator_reports_what_it_did(self):
         self.locate(imsi=IMSI, horizontal_accuracy_m=50,
-                    lpp_transport=lpp_answer)
+                    lpp_transport=UE.answer)
         self.assertTrue(wait_until(lambda: self.sim.counters["positioned"] >= 1))
         last = self.sim.status()["last"]
         self.assertEqual(last["result"], "positioned")

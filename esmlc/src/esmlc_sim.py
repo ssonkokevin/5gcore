@@ -13,6 +13,11 @@ failure cause. Any other answer, or none, fails the dialogue. The UE's
 estimate, if it sends one, is not used: the table is the only position
 source until the assistance and solver work packages land.
 
+With ``capability_exchange`` the dialogue opens with a RequestCapabilities
+transaction, exactly as a real location server would: a UE must say what it
+supports before it is asked to measure. The answer is validated for body and
+transaction and then discarded, because no method ladder exists to use it.
+
 Every configured coordinate is synthetic. The file says so as well.
 """
 
@@ -106,9 +111,11 @@ class EsmlcSimulator:
     def __init__(self, table: PositionTable, host: str = "0.0.0.0",
                  port: int = sls.DEFAULT_SLS_PORT,
                  carrier: str = sls.CARRIER_TCP, lpp_timeout: float = 3.0,
+                 capability_exchange: bool = False,
                  name: str = "esmlc-sim"):
         self.table = table
         self.lpp_timeout = lpp_timeout
+        self.capability_exchange = capability_exchange
         self.server = sls.SlsServer(host, port, self.handle, name=name,
                                     carrier=carrier)
         self.counters: Dict[str, int] = {
@@ -117,6 +124,7 @@ class EsmlcSimulator:
             "no_position": 0,
             "aborts": 0,
             "resets": 0,
+            "lpp_capabilities": 0,
             "lpp_rounds": 0,
             "lpp_rejected": 0,
             "unreadable": 0,
@@ -204,36 +212,72 @@ class EsmlcSimulator:
         for exactly what the answer will claim."""
         area = lpp.circle(target.latitude, target.longitude, target.radius_m)
         first_number = correlation[-1]
+        offset = 0
+        if self.capability_exchange:
+            if not self._relay_capabilities(correlation, first_number,
+                                            connection):
+                return False
+            offset = 1
         for round_no in range(target.lpp_rounds):
-            number = (first_number + round_no) & 0xFF
+            number = (first_number + offset + round_no) & 0xFF
             request = lpp.request_location_information(
                 transaction_number=number,
                 accuracy_code=area.uncertainty_code,
                 end_transaction=round_no == target.lpp_rounds - 1,
                 sequence_number=round_no,
             )
-            connection.send(lcsap.connection_oriented_information(
-                correlation, request))
-            self.counters["lpp_rounds"] += 1
-            try:
-                reply = connection.receive(self.lpp_timeout)
-            except (sls.SlsError, OSError):
-                # The MME may abort and close while this side is still
-                # waiting; that is a failed dialogue, not a server fault.
-                return False
-            if not reply:
-                return False
-            try:
-                answer = lcsap.parse(reply)
-            except lcsap.LcsApError:
-                return False
-            if (answer.procedure != lcsap.PROC_CONNECTION_ORIENTED_INFORMATION
-                    or lcsap.correlation_id(answer) != correlation
-                    or lcsap.lpp_apdu(answer) is None):
-                return False
-            if not self._accept_lpp_answer(lcsap.lpp_apdu(answer), number):
+            apdu = self._transact(correlation, request, connection,
+                                  "lpp_rounds")
+            if apdu is None or not self._accept_lpp_answer(apdu, number):
                 return False
         return True
+
+    def _relay_capabilities(self, correlation: bytes, number: int,
+                            connection: sls.SlsConnection) -> bool:
+        apdu = self._transact(correlation,
+                              lpp.request_capabilities(transaction_number=number),
+                              connection, "lpp_capabilities")
+        if apdu is None:
+            return False
+        try:
+            answer = lpp.parse(apdu)
+        except lpp.LppError:
+            self.counters["lpp_rejected"] += 1
+            return False
+        if (answer.kind != lpp.PROVIDE_CAPABILITIES
+                or answer.transaction_id is None
+                or answer.transaction_id.initiator != lpp.INITIATOR_TARGET_DEVICE
+                or answer.transaction_id.number != number):
+            self.counters["lpp_rejected"] += 1
+            return False
+        return True
+
+    def _transact(self, correlation: bytes, request: bytes,
+                  connection: sls.SlsConnection,
+                  counter: str) -> Optional[bytes]:
+        """Carry one LPP APDU to the UE and return its APDU, or None when the
+        envelope never came back. A peer that closes, times out or answers
+        LCS-AP with the wrong correlation or no APDU fails the round."""
+        connection.send(lcsap.connection_oriented_information(
+            correlation, request))
+        self.counters[counter] += 1
+        try:
+            reply = connection.receive(self.lpp_timeout)
+        except (sls.SlsError, OSError):
+            # The MME may abort and close while this side is still
+            # waiting; that is a failed dialogue, not a server fault.
+            return None
+        if not reply:
+            return None
+        try:
+            answer = lcsap.parse(reply)
+        except lcsap.LcsApError:
+            return None
+        if (answer.procedure != lcsap.PROC_CONNECTION_ORIENTED_INFORMATION
+                or lcsap.correlation_id(answer) != correlation
+                or lcsap.lpp_apdu(answer) is None):
+            return None
+        return lcsap.lpp_apdu(answer)
 
     def _accept_lpp_answer(self, apdu: bytes, number: int) -> bool:
         try:
@@ -286,6 +330,8 @@ def main() -> None:
         port=int(os.getenv("ESMLC_PORT", str(sls.DEFAULT_SLS_PORT))),
         carrier=os.getenv("ESMLC_CARRIER", sls.CARRIER_TCP),
         lpp_timeout=float(os.getenv("ESMLC_LPP_TIMEOUT", "3.0")),
+        capability_exchange=os.getenv(
+            "ESMLC_CAPABILITY_EXCHANGE", "").lower() in ("1", "true", "yes"),
     )
     sim.start()
     logger.info("E-SMLC simulator: %d synthetic targets, carrier %s",
