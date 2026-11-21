@@ -11,10 +11,11 @@ which predates it and mislabels the AVP V/M bits.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import struct
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Dict, List, Optional, Union
 
 logger = logging.getLogger("diameter")
 
@@ -46,6 +47,7 @@ CMD_CAPABILITIES_EXCHANGE = 257
 CMD_DEVICE_WATCHDOG = 280
 CMD_DISCONNECT_PEER = 282
 CMD_PLR = 8388620   # SLg Provide-Location-Request / Answer
+CMD_LRR = 8388621   # SLg Location-Report-Request / Answer
 CMD_RIR = 8388622   # SLh Routing-Info-Request / Answer
 
 # Base AVPs
@@ -67,18 +69,39 @@ AVP_PRODUCT_NAME = 269
 AVP_FIRMWARE_REVISION = 267
 AVP_MSISDN = 701
 
+# Vendor identifier every 3GPP AVP carries (TS 29.172 clause 6).
+VENDOR_3GPP = 10415
+
+# SLg AVPs, TS 29.172. Numbers cross-checked against the GMLC's dictionary.
+AVP_SLG_LOCATION_TYPE = 2500
+AVP_LCS_EPS_CLIENT_NAME = 2501
+AVP_LCS_CLIENT_TYPE = 1241        # TS 32.299
+AVP_LCS_QOS = 2504
+AVP_HORIZONTAL_ACCURACY = 2505
+AVP_RESPONSE_TIME = 2509
+AVP_ACCURACY_FULFILMENT = 2513
+AVP_AGE_OF_LOCATION = 2514
+AVP_ECGI = 2517
+
+# LCS-QoS response-time value used by the GMLC: low delay.
+SLG_SLG_LOCATION_TYPE_CURRENT_OR_LAST_KNOWN = 1
+SLG_RESPONSE_TIME_LOW_DELAY = 0
+
 # Result codes
 RESULT_SUCCESS = 2001
 RESULT_LIMITED_SUCCESS = 2002
 RESULT_UNABLE_TO_COMPLY = 5012
 RESULT_AUTHORIZATION_REJECTED = 5003
-RESULT_UNKNOWN_APPLICATION = 5001
 RESULT_INVALID_AVP_VALUE = 5004
 RESULT_MISSING_AVP = 5005
 RESULT_NO_COMMON_APPLICATION = 5010
 RESULT_COMMAND_UNSUPPORTED = 3001
 RESULT_REALM_NOT_SERVED = 3003
 RESULT_APPLICATION_UNSUPPORTED = 3007
+RESULT_USER_UNKNOWN = 5001
+RESULT_ABSENT_USER = 4201
+RESULT_UNREACHABLE_USER = 4221
+RESULT_POSITIONING_FAILED = 4225
 
 
 class DiameterError(Exception):
@@ -167,7 +190,11 @@ def decode_avps(payload: bytes) -> List[AVP]:
                 _raw_payload_len=len(data),
             )
         )
-        offset += length
+        # RFC 6733 counts the padding in the length; the Java GMLC counts
+        # only the value and relies on rounding up. Accept both: the value
+        # ends where the sender said it does, and the next AVP starts on
+        # the four-octet boundary.
+        offset += (length + 3) & ~3
     return avps
 
 
@@ -308,7 +335,9 @@ class DiameterServer:
     """One request/answer per message; unknown peers are still answered so the
     peer gets a real error instead of a hang."""
 
-    def __init__(self, host: str, port: int, handler: Callable[[Message], Optional[Message]],
+    def __init__(self, host: str, port: int,
+                 handler: Callable[[Message], Union[Optional[Message],
+                                                   Awaitable[Optional[Message]]]],
                  name: str = "diameter"):
         self.host = host
         self.port = port
@@ -321,6 +350,10 @@ class DiameterServer:
 
     async def start(self) -> None:
         self._server = await asyncio.start_server(self._serve, self.host, self.port)
+        # Port 0 means "choose one"; report the port actually bound.
+        sockets = self._server.sockets or ()
+        if sockets:
+            self.port = sockets[0].getsockname()[1]
         logger.info("%s listening on %s:%s (TCP)", self.name, self.host, self.port)
 
     async def _serve(self, reader: asyncio.StreamReader,
@@ -340,6 +373,10 @@ class DiameterServer:
                                    self.name, peer, exc)
                     break
                 response = self.handler(request)
+                if inspect.isawaitable(response):
+                    # A slow procedure must not stall the loop that serves
+                    # every other peer; the handler yields to a worker thread.
+                    response = await response
                 if response is None:
                     continue
                 writer.write(response.encode())

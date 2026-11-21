@@ -12,6 +12,7 @@ RUN pip install --no-cache-dir \
 COPY ./corelib/ /app/corelib/
 COPY ./lib/ /app/lib/
 COPY ./mme/src/ /app/src/
+COPY ./mme/config/ /app/config/
 
 EXPOSE 3875/tcp 8075/tcp
 CMD ["python", "/app/src/mme_server.py"]

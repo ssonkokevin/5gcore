@@ -130,6 +130,24 @@ class GeneratedCodec(unittest.TestCase):
                          "lcsap_codec.py is stale; rerun lib/codecs/build_lcsap.py")
 
 
+class PlmnIdentity(unittest.TestCase):
+    def test_two_digit_mnc_matches_the_committed_lab_plmn(self):
+        # 001-01 in TS 29.274 order is 00 f1 10, the same bytes the GMLC
+        # parses out of an ECGI. It is not the TBCD digit order.
+        self.assertEqual(lcsap.plmn_identity("001", "01"), b"\x00\xf1\x10")
+        self.assertEqual(lcsap.plmn_identity("001", "01"), lcsap.LAB_PLMN)
+        self.assertNotEqual(lcsap.tbcd("00101"), lcsap.LAB_PLMN)
+
+    def test_three_digit_mnc(self):
+        self.assertEqual(lcsap.plmn_identity("310", "260"), b"\x13\x00\x62")
+
+    def test_bad_digits_are_rejected(self):
+        with self.assertRaises(lcsap.LcsApError):
+            lcsap.plmn_identity("01", "01")
+        with self.assertRaises(lcsap.LcsApError):
+            lcsap.plmn_identity("001", "1")
+
+
 class PositioningMethod(unittest.TestCase):
     def test_method_and_usage_are_decoded_from_the_octet(self):
         for octet, name in ((lcsap.METHOD_CELL_ID, "cell-id"),

@@ -208,7 +208,9 @@ class EsmlcSimulator:
             self.counters["lpp_rounds"] += 1
             try:
                 reply = connection.receive(self.lpp_timeout)
-            except sls.SlsError:
+            except (sls.SlsError, OSError):
+                # The MME may abort and close while this side is still
+                # waiting; that is a failed dialogue, not a server fault.
                 return False
             if not reply:
                 return False

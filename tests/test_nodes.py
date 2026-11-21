@@ -68,20 +68,60 @@ class MME(unittest.TestCase):
 
     def test_health_states_what_is_missing(self):
         body = self.client.get("/health").json()
-        self.assertEqual(body["scope"], "SLg only")
+        self.assertEqual(body["scope"], "LCS function (SLg + SLs)")
         self.assertEqual(body["s1ap"], "not implemented")
+        self.assertEqual(body["lpp"][:8], "relayed ")
+        self.assertIn("esmlc", body["sls"])
         self.assertFalse(body["ue_attach"] if "ue_attach" in body else False)
 
-    def test_plr_shim_answers_5012(self):
+    def test_plr_for_an_unknown_subscriber_is_5001(self):
         response = self.client.post(
             "/slg/plr",
             json={"session_id": "gmlc;abc;1", "subscriber": "641020123456789"},
         )
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(body["result_code"], d.RESULT_UNABLE_TO_COMPLY)
+        self.assertEqual(body["result_code"], d.RESULT_USER_UNKNOWN)
         self.assertEqual(body["command_code"], d.CMD_PLR)
-        self.assertIn("not implemented", body["error_message"])
+        self.assertFalse(body["positioned"])
+        self.assertIn("no context", body["error_message"])
+
+    def test_plr_without_an_identity_is_5005(self):
+        body = self.client.post(
+            "/slg/plr", json={"session_id": "gmlc;abc;2"}).json()
+        self.assertEqual(body["result_code"], d.RESULT_MISSING_AVP)
+
+    def test_location_reporting_is_refused_not_dropped(self):
+        body = self.client.post(
+            "/slg/plr",
+            json={"session_id": "gmlc;abc;3", "subscriber": "001010000000001",
+                  "location_type": 3},
+        ).json()
+        self.assertEqual(body["result_code"], d.RESULT_UNABLE_TO_COMPLY)
+        self.assertIn("Phase 4", body["error_message"])
+
+    def test_lab_registry_round_trip(self):
+        seeded = self.client.get("/lab/ue").json()
+        self.assertGreaterEqual(seeded["count"], 3)
+        created = self.client.post("/lab/ue", json={
+            "imsi": "001010000000099", "mcc": "001", "mnc": "01",
+            "cell": "0x00A1B2C", "rrc_state": "idle",
+        })
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json()["rrc_state"], "idle")
+        removed = self.client.delete("/lab/ue/001010000000099")
+        self.assertEqual(removed.status_code, 200)
+        self.assertEqual(self.client.delete("/lab/ue/001010000000099").status_code, 404)
+
+    def test_lab_rejects_a_bad_imsi(self):
+        response = self.client.post("/lab/ue", json={
+            "imsi": "12ab", "cell": "0x00A1B2C"})
+        self.assertEqual(response.status_code, 400)
+
+    def test_lab_cells_are_listed(self):
+        body = self.client.get("/lab/cells").json()
+        self.assertGreaterEqual(len(body["cells"]), 3)
+        self.assertTrue(all(cell["radius_m"] > 0 for cell in body["cells"]))
 
     def test_plr_for_other_realm_is_rejected(self):
         body = self.client.post(
@@ -125,7 +165,8 @@ class MME(unittest.TestCase):
             pla = read_pdu(sock)
             self.assertEqual(pla.command_code, d.CMD_PLR)
             self.assertEqual(pla.app_id, d.APP_SLG)
-            self.assertEqual(pla.avp(d.AVP_RESULT_CODE).as_uint32(), d.RESULT_UNABLE_TO_COMPLY)
+            self.assertEqual(pla.avp(d.AVP_RESULT_CODE).as_uint32(), d.RESULT_USER_UNKNOWN)
+            self.assertIsNone(pla.avp(d.AVP_ECGI))
             self.assertEqual(pla.avp(d.AVP_SESSION_ID).as_string(), "gmlc;tcp;1")
             self.assertEqual(pla.avp(d.AVP_DESTINATION_REALM).as_string(), "core.local")
         finally:

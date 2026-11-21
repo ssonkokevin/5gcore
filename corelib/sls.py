@@ -246,6 +246,8 @@ class SlsServer:
                 try:
                     answer = self.handler(pdu, connection)
                 except Exception:
+                    if self._stop.is_set():
+                        break
                     # One bad dialogue must not take the listener down.
                     self.errors += 1
                     logger.exception("%s: handler failed for %s", self.name, peer)

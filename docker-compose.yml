@@ -1042,9 +1042,12 @@ services:
       - ESMLC_ADDR=${ESMLC_ADDR:-esmlc-sim}
       - ESMLC_PORT=9082
       - MME_SLS_CARRIER=${MME_SLS_CARRIER:-tcp}
+      - MME_ESMLC_TIMEOUT=${MME_ESMLC_TIMEOUT:-5.0}
+      - MME_LAB_SEED=${MME_LAB_SEED:-1}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./mme/src:/app/src
+      - ./mme/config:/app/config:ro
       - ./corelib:/app/corelib:ro
       - ./lib:/app/lib:ro
     depends_on:

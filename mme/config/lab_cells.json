@@ -1,0 +1,27 @@
+{
+  "note": "Synthetic lab cell plan for Cell-ID fallback. Numbers are invented for lab PLMN 001-01 and are the same three cells the E-SMLC simulator knows; no value comes from an operator plan or a live network. Replace this file with the real plan before any field use.",
+  "plmn": "001-01",
+  "cells": [
+    {
+      "cell": "0x00A1B2C",
+      "label": "lab-cell-alpha",
+      "latitude": 0.347596,
+      "longitude": 32.582520,
+      "radius_m": 35
+    },
+    {
+      "cell": "0x00A1B2D",
+      "label": "lab-cell-bravo",
+      "latitude": 0.313600,
+      "longitude": 32.581100,
+      "radius_m": 120
+    },
+    {
+      "cell": "0x00A1B2E",
+      "label": "lab-cell-charlie",
+      "latitude": 0.290000,
+      "longitude": 32.600000,
+      "radius_m": 550
+    }
+  ]
+}

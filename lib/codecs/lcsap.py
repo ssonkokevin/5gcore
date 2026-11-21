@@ -79,7 +79,8 @@ _USAGE_NAMES = {0: "attempted-unsuccessfully", 1: "results-unused",
                 2: "verification-only", 3: "generated-location",
                 4: "multiple-methods-undetermined"}
 
-LAB_PLMN = b"\x00\xf1\x10"   # MCC 001, MNC 01 (F filler), TS 24.008 TBCD
+# MCC 001, MNC 01 (0xF filler) in the TS 29.274 8.21.5 order, not TBCD.
+LAB_PLMN = b"\x00\xf1\x10"
 
 
 class LcsApError(ValueError):
@@ -277,6 +278,27 @@ def tbcd(digits: str) -> bytes:
     for i in range(0, len(padded), 2):
         out.append(int(padded[i + 1], 16) << 4 | int(padded[i], 16))
     return bytes(out)
+
+
+def plmn_identity(mcc: str, mnc: str) -> bytes:
+    """The three-octet PLMN of TS 29.274 8.21.5, which is the form the
+    PLMNidentity inside an E-CGI uses: octet 1 is MCC digit 2 over digit 1,
+    octet 2 is MNC digit 3 over MCC digit 3, octet 3 is MNC digit 2 over
+    digit 1. A two-digit MNC fills digit 3 with 0xF.
+
+    This is deliberately not tbcd(): an IMSI is TBCD in digit order, while a
+    PLMN identity is not.
+    """
+    if len(mcc) != 3 or not mcc.isdigit():
+        raise LcsApError("an MCC is exactly three decimal digits")
+    if not 2 <= len(mnc) <= 3 or not mnc.isdigit():
+        raise LcsApError("an MNC is two or three decimal digits")
+    mnc3 = int(mnc[2]) if len(mnc) == 3 else 0xF
+    return bytes([
+        int(mcc[1]) << 4 | int(mcc[0]),
+        mnc3 << 4 | int(mcc[2]),
+        int(mnc[1]) << 4 | int(mnc[0]),
+    ])
 
 
 def correlation_id(message: LcsApMessage) -> Optional[bytes]:
