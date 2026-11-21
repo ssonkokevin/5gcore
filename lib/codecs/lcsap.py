@@ -18,10 +18,16 @@ reported as a decode error rather than flattened to a bare point.
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from lib.codecs import lcsap_codec as _codec
+
+# pycrate's PDU object keeps the value it last decoded or encoded, so sharing
+# one across threads corrupts both sides. Every use is serialised here; the
+# codec is fast and the lock only wraps the encode/decode call itself.
+_CODEC_LOCK = threading.RLock()
 
 PROC_LOCATION_SERVICE = 0
 PROC_CONNECTION_ORIENTED_INFORMATION = 1
@@ -234,8 +240,9 @@ def reset_acknowledge() -> bytes:
 def parse(data: bytes) -> LcsApMessage:
     obj = _codec.LCS_AP_PDU_Descriptions.LCS_AP_PDU
     try:
-        obj.from_aper(bytes(data))
-        kind, body = obj.get_val()
+        with _CODEC_LOCK:
+            obj.from_aper(bytes(data))
+            kind, body = obj.get_val()
     except Exception as exc:
         raise LcsApError(f"not an LCS-AP PDU: {exc}") from exc
     name, message = body["value"]
@@ -336,13 +343,14 @@ def positioning_method(octet: int) -> Tuple[str, str]:
 def _pdu(kind: str, procedure: int, name: str, ies: List[Dict[str, Any]],
          criticality: str = CRITICALITY_REJECT) -> bytes:
     obj = _codec.LCS_AP_PDU_Descriptions.LCS_AP_PDU
-    obj.set_val((kind, {
-        "procedureCode": procedure,
-        "criticality": criticality,
-        "value": (name, {"protocolIEs": ies}),
-    }))
     try:
-        return obj.to_aper()
+        with _CODEC_LOCK:
+            obj.set_val((kind, {
+                "procedureCode": procedure,
+                "criticality": criticality,
+                "value": (name, {"protocolIEs": ies}),
+            }))
+            return obj.to_aper()
     except Exception as exc:  # pycrate raises its own error types
         raise LcsApError(f"{name} could not be encoded: {exc}") from exc
 

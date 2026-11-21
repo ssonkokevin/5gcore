@@ -5,6 +5,7 @@
 
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -81,6 +82,26 @@ class RoundTrip(unittest.TestCase):
     def test_garbage_is_rejected_not_decoded(self):
         with self.assertRaises(lcsap.LcsApError):
             lcsap.parse(b"\xff\xff\xff")
+
+
+class ConcurrentCodec(unittest.TestCase):
+    def test_the_shared_codec_object_is_not_corrupted_across_threads(self):
+        # The MME opens one SLs dialogue per session, so encodes and decodes
+        # for different subscribers run in different threads at the same time.
+        def work(worker):
+            for round_no in range(100):
+                correlation = (worker * 100000 + round_no).to_bytes(4, "big")
+                area = lcsap.circle(0.3 + worker * 0.01, 32.5, 40.0)
+                wire = lcsap.location_response(
+                    correlation, area, fulfilled=lcsap.ACCURACY_FULFILLED)
+                message = lcsap.parse(wire)
+                self.assertEqual(lcsap.correlation_id(message), correlation)
+                decoded = lcsap.decode_area(message)
+                self.assertEqual(decoded.uncertainty_code, area.uncertainty_code)
+                self.assertAlmostEqual(decoded.latitude, area.latitude, places=3)
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(work, range(8)))
 
 
 class Uncertainty(unittest.TestCase):
