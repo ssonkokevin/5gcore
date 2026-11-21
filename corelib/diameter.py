@@ -123,7 +123,8 @@ class AVP:
         if self.mandatory:
             flags |= AVP_FLAG_MANDATORY
         pad = b"\x00" * (-len(self.value) % 4)
-        length = 8 + (4 if self.vendor_id else 0) + len(self.value) + len(pad)
+        # RFC 6733 4.1: the padding is not reflected in the AVP length.
+        length = 8 + (4 if self.vendor_id else 0) + len(self.value)
         out = struct.pack("!II", (self.code << 8) | flags, length)
         if self.vendor_id:
             out += struct.pack("!I", self.vendor_id)
@@ -190,10 +191,9 @@ def decode_avps(payload: bytes) -> List[AVP]:
                 _raw_payload_len=len(data),
             )
         )
-        # RFC 6733 counts the padding in the length; the Java GMLC counts
-        # only the value and relies on rounding up. Accept both: the value
-        # ends where the sender said it does, and the next AVP starts on
-        # the four-octet boundary.
+        # RFC 6733 excludes the padding from the length. Some peers include
+        # it anyway, so the value ends where the sender said it does and the
+        # next AVP starts on the four-octet boundary.
         offset += (length + 3) & ~3
     return avps
 
