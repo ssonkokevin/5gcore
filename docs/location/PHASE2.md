@@ -1,9 +1,9 @@
 # Phase 2 checkpoint - the 4G E-SMLC path
 
-Date: 2026-11-21. Status: 2a, 2b, the MME half of 2e and the UE half of 2f
-delivered; 2c, 2d, the S1AP half of 2e, the eNB half of 2f and the pcap
-export are open. This note is the evidence for PLAN 2g/2h and the honest list
-of what a Phase 2 request can and cannot do today.
+Date: 2026-11-21. Status: 2a, 2b, the S1AP codec half of 2e and the UE half
+of 2f delivered; 2c, 2d, the MME relay half of 2e, the eNB half of 2f and
+the pcap export are open. This note is the evidence for PLAN 2g/2h and the
+honest list of what a Phase 2 request can and cannot do today.
 
 Everything here runs on the Windows development host over the D5 TCP carrier,
 with in-process simulators. No SCTP association, Docker, MariaDB or radio has
@@ -22,7 +22,8 @@ been exercised. Coordinates are synthetic for lab PLMN 001-01.
 | LPP NAS relay | `mme/src/lcsap_client.py`, `nas_relay.py` | MME relays opaquely; the E-SMLC and lab UE speak TS 37.355 |
 | Lab UE | `esmlc/src/lpp_ue.py` | six LPP behaviours behind an HTTP endpoint; answers real TS 37.355, no measurements |
 | Cell-ID fallback | `mme/src/location_service.py`, `cell_plan.py` | labelled `CELL_PLAN`, age unknown, no invented age |
-| S1AP / LPPa transport | - | not built; `eNB` signalling is absent |
+| S1AP codec (TS 36.413) | `lib/codecs/s1ap.py`, generated from the annex | 2e-1 done; message layer only |
+| S1AP / LPPa relay | - | not built; no S1 association, so `eNB` signalling is absent |
 
 Every outcome carries `method`, `source`, `uncertainty_m`, `accuracy_fulfilled`
 (when an accuracy was asked for) and `age_seconds` (when the source knows it).
@@ -97,6 +98,45 @@ UE's answer must be a ProvideLocationInformation for the same transaction,
 from the target device, with no failure cause. The UE's estimate, if it sends
 one, is not used: the table remains the only position source until the
 assistance and solver work packages land.
+
+## 2e-1 S1AP codec
+
+TS 36.413 (36413-j20) is compiled from its published docx by
+`lib/codecs/build_s1ap.py`. S1AP is seven modules that import from one
+another, so all are extracted and compiled together in dependency order:
+
+| Output | Size |
+|---|---|
+| `lib/codecs/asn1/s1ap.asn` (CommonDataTypes, Constants, Containers, IEs, PDU-Contents, PDU-Descriptions, SonTransfer-IEs) | 288,049 bytes |
+| `lib/codecs/s1ap_codec.py` (pycrate 0.8.1 generator) | 2,604,033 bytes |
+
+The plain-text rendering of the same delivery is not usable as a source: the
+PDF extraction merges identifiers with their types
+(`procedureCodeProcedureCode`) and drops type references outright
+(`&InitiatingMessage,`). D4 forbids hand-reconstructed syntax, so the builder
+reads the docx runs, the same way the LCS-AP and LPP builders do, and its
+docstring records why.
+
+`lib/codecs/s1ap.py` is the surface the relay will use: builders and
+decoders for S1 setup (request, response, failure), InitialUEMessage, both
+NAS transports, Paging (S-TMSI or IMSI, with the TS 36.413 9.1.6 index
+rule), UE context release, the two UE-associated and two non-UE-associated
+LPPa transports, and ErrorIndication. Accessors return the E-UTRAN CGI, TAI,
+NAS PDU, LPPa PDU, routing identity and S1AP identities. A cell identity
+that is not 28 bits, a TAI list entry of another type and an elementary
+procedure outside the generated object set are errors, not guesses.
+
+`tests/test_s1ap_codec.py` has 29 cases: a round trip for every message, the
+paging index rule, the identity bounds, exactly-one-identity paging,
+malformed and truncated PDUs, an unknown procedure, a non-28-bit CGI, a TAI
+list entry of the wrong type, an eight-thread concurrency check, and the
+staleness check that regenerates the codec from `asn1/s1ap.asn` and compares
+it byte for byte.
+
+What this is not: there is no S1 association, no S1 setup handshake, no
+paging procedure and no LPPa relay in the MME yet. The codec and message
+layer are the foundation for 2e-2; until that lands the MME still has no eNB
+path, and LPPa (TS 36.455) is not compiled.
 
 ## 2f Lab UE
 
@@ -265,7 +305,7 @@ and rejected the PLA. Two changes fixed it:
 |---|---|---|
 | 2c A-GNSS assistance and solver | the codec exists, but no assistance generator or orbit/clock model is built | E-SMLC can only answer cell/E-CID from its table |
 | 2d method ladder | no measurements to rank; the table names the method | no fallback ordering among measured methods |
-| 2e S1AP/LPPa relay | no S1AP stack in this MME | no eNB measurements, no handover visibility |
+| 2e S1AP/LPPa relay | the codec and message layer are delivered (2e-1); the MME has no S1 association, setup handshake or relay yet | no eNB measurements, no handover visibility |
 | 2f eNB simulator, measured UE | the UE half is delivered in `lpp_ue.py`; the eNB half needs S1AP/LPPa (2e), and neither reports measurements | the dialogue is real but no measurement ever drives a position |
 | pcap export | see above | byte-level evidence waits for Linux SCTP |
 | SCTP itself | no `AF_SCTP` on this host | D5 SCTP path is implemented but unverified |

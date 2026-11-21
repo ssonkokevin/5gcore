@@ -101,6 +101,14 @@ messages round-trip through the generated module in `tests/test_lcsap_codec.py`.
 **Repairs.** The docx has two formatting artefacts; the builder lists them and
 a compile failure is raised, never swallowed. No protocol type is altered.
 
+**S1AP and LPP take the same route.** `build_s1ap.py` extracts the seven
+TS 36.413 modules and `build_lpp.py` the two TS 37.355 modules from their
+published docx deliveries, each with a documented repair list (both are
+empty). The plain-text renderings those specifications also came in are
+lossy, so they are not a source: S1AP's merges identifiers with their types
+and drops type references. Regenerating from the committed `.asn` is a test
+in every codec, LCS-AP included.
+
 ---
 
 ## D5. Transport abstraction: SCTP in production, TCP carrier in the lab
