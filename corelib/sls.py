@@ -263,9 +263,12 @@ class SlsServer:
             connection.close()
 
     def stats(self) -> dict:
+        with self._active_lock:
+            active = len(self._active)
         return {
             "carrier": self.carrier,
             "connections": self.connections,
+            "active_connections": active,
             "messages_in": self.messages_in,
             "messages_out": self.messages_out,
             "handler_errors": self.errors,
