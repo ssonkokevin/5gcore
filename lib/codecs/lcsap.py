@@ -67,6 +67,18 @@ ACCURACY_NOT_FULFILLED = "requested-accuracy-not-fulfilled"
 PAYLOAD_LPP = "lPP"
 PAYLOAD_LPPA = "lPPa"
 
+# Positioning-Method-And-Usage, TS 29.171 7.4.13: method in bits 8-4, usage in
+# bits 3-1. These octets say "results used to generate the location" (011).
+METHOD_CELL_ID = 0x03
+METHOD_E_CID = 0x13
+METHOD_OTDOA = 0x23
+METHOD_U_TDOA = 0x43
+
+_METHOD_NAMES = {0: "cell-id", 2: "e-cid", 4: "otdoa", 8: "u-tdoa"}
+_USAGE_NAMES = {0: "attempted-unsuccessfully", 1: "results-unused",
+                2: "verification-only", 3: "generated-location",
+                4: "multiple-methods-undetermined"}
+
 LAB_PLMN = b"\x00\xf1\x10"   # MCC 001, MNC 01 (F filler), TS 24.008 TBCD
 
 
@@ -273,6 +285,30 @@ def correlation_id(message: LcsApMessage) -> Optional[bytes]:
 
 def lpp_apdu(message: LcsApMessage) -> Optional[bytes]:
     return message.ie("APDU")
+
+
+def positioning_data(message: LcsApMessage) -> Optional[int]:
+    """The first positioning-method octet, or None when the response carries
+    no Positioning-Data. Later methods in the set are not merged."""
+    value = message.ie("Positioning-Data")
+    if not value:
+        return None
+    methods = value.get("positioning-Data-Set") or []
+    if not methods:
+        return None
+    return methods[0][0]
+
+
+def positioning_method(octet: int) -> Tuple[str, str]:
+    """Decode one Positioning-Method-And-Usage octet (TS 29.171 7.4.13).
+    Unknown bit patterns are reported as reserved, never guessed."""
+    if not isinstance(octet, int) or not 0 <= octet <= 0xFF:
+        raise LcsApError("a positioning-method octet is 0..255")
+    method = _METHOD_NAMES.get(octet >> 3)
+    if method is None:
+        method = f"reserved-method-{octet >> 3:05b}"
+    usage = _USAGE_NAMES.get(octet & 0x07, "reserved-usage")
+    return method, usage
 
 
 def _pdu(kind: str, procedure: int, name: str, ies: List[Dict[str, Any]],

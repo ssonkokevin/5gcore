@@ -1,0 +1,32 @@
+{
+  "note": "Synthetic lab positions for the SLs simulator. Every IMSI, cell and coordinate below is invented for lab PLMN 001-01; no value comes from a subscriber record or a live network.",
+  "plmn": "001-01",
+  "positions": [
+    {
+      "imsi": "001010000000001",
+      "cell": "0x00A1B2C",
+      "latitude": 0.347596,
+      "longitude": 32.582520,
+      "radius_m": 35.0,
+      "method": "e-cid",
+      "lpp_rounds": 1
+    },
+    {
+      "imsi": "001010000000002",
+      "cell": "0x00A1B2D",
+      "latitude": 0.313600,
+      "longitude": 32.581100,
+      "radius_m": 120.0,
+      "method": "otdoa",
+      "lpp_rounds": 2
+    },
+    {
+      "cell": "0x00A1B2E",
+      "latitude": 0.290000,
+      "longitude": 32.600000,
+      "radius_m": 550.0,
+      "method": "cell-id",
+      "lpp_rounds": 0
+    }
+  ]
+}

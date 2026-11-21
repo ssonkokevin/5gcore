@@ -22,6 +22,7 @@
 #   8081  oam ${OAM_HOST_PORT}                8001  custom-amf http ${AMF_HOST_PORT}
 #   8003  custom-lmf ${LMF_HOST_PORT}         8075  custom-mme http ${MME_HTTP_HOST_PORT}
 #   3875  custom-mme SLg ${MME_SLG_HOST_PORT} 8090  hss ${HSS_HOST_PORT}
+#   9082  esmlc-sim SLs ${ESMLC_SLS_HOST_PORT}
 #   3001  oam-frontend ${OAM_FRONTEND_PORT}
 #   (the GMLC is a separate service: github.com/ssonkokevin/gmlc)
 #   8805  custom-upf PFCP ${UPF_PFCP_HOST_PORT}
@@ -1037,10 +1038,17 @@ services:
       - MME_ORIGIN_REALM=${MME_ORIGIN_REALM:-core.local}
       - MME_PRODUCT_NAME=${MME_PRODUCT_NAME:-Hamiltel-MME}
       - DIAMETER_VENDOR_ID=${DIAMETER_VENDOR_ID:-10415}
+      # SLs client. The carrier is the D5 lab carrier until this runs on Linux.
+      - ESMLC_ADDR=${ESMLC_ADDR:-esmlc-sim}
+      - ESMLC_PORT=9082
+      - MME_SLS_CARRIER=${MME_SLS_CARRIER:-tcp}
       - LOG_LEVEL=${LOG_LEVEL:-info}
     volumes:
       - ./mme/src:/app/src
       - ./corelib:/app/corelib:ro
+      - ./lib:/app/lib:ro
+    depends_on:
+      - esmlc-sim
     ports:
       - "${MME_SLG_HOST_PORT:-3875}:3875/tcp"
       - "${MME_HTTP_HOST_PORT:-8075}:8075/tcp"
@@ -1051,6 +1059,37 @@ services:
       retries: 5
       start_period: 15s
     command: ["python", "/app/src/mme_server.py"]
+    networks:
+      - core-net
+
+  # Lab E-SMLC. Answers Location-Request from a synthetic table and simulates
+  # the LPP dialogue with a labelled opaque token; it does not compute a real
+  # position and never invents one for an unknown target. Replace this service
+  # with the licensed E-SMLC in a network build.
+  esmlc-sim:
+    build:
+      context: .
+      dockerfile: docker/esmlc/Dockerfile
+    container_name: core-esmlc-sim
+    restart: unless-stopped
+    environment:
+      - ESMLC_BIND_ADDR=0.0.0.0
+      - ESMLC_PORT=9082
+      - ESMLC_CARRIER=${ESMLC_CARRIER:-tcp}
+      - ESMLC_LPP_TIMEOUT=${ESMLC_LPP_TIMEOUT:-3.0}
+      - ESMLC_POSITIONS=/app/esmlc/config/lab_positions.json
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    volumes:
+      - ./esmlc/config:/app/esmlc/config:ro
+    ports:
+      - "${ESMLC_SLS_HOST_PORT:-9082}:9082/tcp"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket;socket.create_connection(('127.0.0.1',9082),2)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    command: ["python", "/app/esmlc/src/esmlc_sim.py"]
     networks:
       - core-net
 

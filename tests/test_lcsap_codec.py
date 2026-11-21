@@ -130,6 +130,28 @@ class GeneratedCodec(unittest.TestCase):
                          "lcsap_codec.py is stale; rerun lib/codecs/build_lcsap.py")
 
 
+class PositioningMethod(unittest.TestCase):
+    def test_method_and_usage_are_decoded_from_the_octet(self):
+        for octet, name in ((lcsap.METHOD_CELL_ID, "cell-id"),
+                            (lcsap.METHOD_E_CID, "e-cid"),
+                            (lcsap.METHOD_OTDOA, "otdoa"),
+                            (lcsap.METHOD_U_TDOA, "u-tdoa")):
+            self.assertEqual(lcsap.positioning_method(octet),
+                             (name, "generated-location"))
+
+    def test_reserved_bits_are_reported_not_guessed(self):
+        self.assertEqual(lcsap.positioning_method(0x09)[0],
+                         "reserved-method-00001")
+        self.assertEqual(lcsap.positioning_method(0x07)[1], "reserved-usage")
+
+    def test_positioning_data_reads_the_first_method(self):
+        wire = lcsap.location_response(
+            CORR, lcsap.circle(0.0, 0.0, 35.0),
+            positioning_method=bytes([lcsap.METHOD_E_CID]))
+        self.assertEqual(lcsap.positioning_data(lcsap.parse(wire)),
+                         lcsap.METHOD_E_CID)
+
+
 class Rejections(unittest.TestCase):
     def test_correlation_id_must_be_four_octets(self):
         with self.assertRaises(lcsap.LcsApError):
