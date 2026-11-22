@@ -154,49 +154,53 @@ ocs_config = OCSConfig()
 
 
 # ============================================================================
-# AVP Encoding/Decoding (Same as Diameter server)
+# AVP Encoding/Decoding (RFC 6733 4.1; same layout as the Diameter server)
 # ============================================================================
 
 def encode_avp(code: int, flags: int, vendor_id: int, data: bytes) -> bytes:
-    """Encode a Diameter AVP."""
-    avp_len = 8 + len(data)
-    header = struct.pack("!I", (code << 8) | flags)
-    header += struct.pack("!I", avp_len)
-    header += struct.pack("!I", vendor_id)
-    return header + data
+    """Encode a Diameter AVP: four-octet code, one-octet flags, three-octet length."""
+    has_vendor = bool(flags & 0x80)
+    avp_len = (12 if has_vendor else 8) + len(data)
+    header = (
+        struct.pack("!I", code)
+        + struct.pack("!B", flags)
+        + avp_len.to_bytes(3, "big")
+    )
+    if has_vendor:
+        header += struct.pack("!I", vendor_id)
+    return header + data + b"\x00" * (-len(data) % 4)
 
 
 def encode_uint32_avp(code: int, value: int, vendor_id: int = 0, mandatory: bool = True) -> bytes:
     """Encode an unsigned 32-bit AVP."""
-    flags = 0x80 if mandatory else 0x00
+    flags = (0x80 if vendor_id else 0x00) | (0x40 if mandatory else 0x00)
     data = struct.pack("!I", value)
     return encode_avp(code, flags, vendor_id, data)
 
 
 def encode_utf8_avp(code: int, value: str, vendor_id: int = 0, mandatory: bool = True) -> bytes:
     """Encode a UTF8String AVP."""
-    flags = 0x80 if mandatory else 0x00
+    flags = (0x80 if vendor_id else 0x00) | (0x40 if mandatory else 0x00)
     data = value.encode('utf-8')
     return encode_avp(code, flags, vendor_id, data)
 
 
 def encode_grouped_avp(code: int, sub_avps: bytes, vendor_id: int = 0, mandatory: bool = True) -> bytes:
     """Encode a Grouped AVP."""
-    flags = 0x80 if mandatory else 0x00
+    flags = (0x80 if vendor_id else 0x00) | (0x40 if mandatory else 0x00)
     return encode_avp(code, flags, vendor_id, sub_avps)
 
 
 def decode_avp(data: bytes, offset: int = 0) -> Tuple[int, int, int, int, bytes]:
-    """Decode a Diameter AVP."""
-    avp_code = struct.unpack("!I", data[offset:offset+4])[0]
-    code = (avp_code >> 8) & 0xFFFFFF
-    flags = (avp_code >> 24) & 0xFF
-    avp_len = struct.unpack("!I", data[offset+4:offset+8])[0]
-    vendor_id = struct.unpack("!I", data[offset+8:offset+12])[0] if (flags & 0x80) else 0
+    """Decode a Diameter AVP. Returns (code, flags, length, vendor_id, data, next_offset)."""
+    code = struct.unpack("!I", data[offset:offset+4])[0]
+    flags = data[offset+4]
+    avp_len = int.from_bytes(data[offset+5:offset+8], "big")
     has_vendor = bool(flags & 0x80)
+    vendor_id = struct.unpack("!I", data[offset+8:offset+12])[0] if has_vendor else 0
     base_len = 12 if has_vendor else 8
     avp_data = data[offset+base_len:offset+avp_len]
-    next_offset = offset + avp_len
+    next_offset = offset + ((avp_len + 3) & ~3)
     return code, flags, avp_len, vendor_id, avp_data, next_offset
 
 
@@ -228,19 +232,25 @@ def avp_get_utf8(avp_data: bytes) -> str:
 # Diameter Message Building
 # ============================================================================
 
-def build_diameter_header(command_code: int, flags: int, app_id: int, hop_by_hop: int, end_to_end: int) -> bytes:
-    hdr = struct.pack("!I", (command_code << 8) | flags)
-    hdr += struct.pack("!I", app_id)
-    hdr += struct.pack("!I", hop_by_hop)
-    hdr += struct.pack("!I", end_to_end)
-    return hdr
+def build_diameter_header(command_code: int, flags: int, app_id: int,
+                          hop_by_hop: int, end_to_end: int,
+                          message_length: int = 0) -> bytes:
+    """Build the 20-octet Diameter header (RFC 6733 §3)."""
+    return (
+        struct.pack("!I", (0x01 << 24) | message_length)
+        + struct.pack("!I", (flags << 24) | command_code)
+        + struct.pack("!I", app_id)
+        + struct.pack("!I", hop_by_hop)
+        + struct.pack("!I", end_to_end)
+    )
 
 
 def build_diameter_message(command_code: int, flags: int, app_id: int, avps: List[bytes]) -> bytes:
     hop_by_hop = secrets.randbits(32)
     end_to_end = secrets.randbits(32)
     body = b"".join(avps)
-    hdr = build_diameter_header(command_code, flags, app_id, hop_by_hop, end_to_end)
+    hdr = build_diameter_header(command_code, flags, app_id, hop_by_hop, end_to_end,
+                                20 + len(body))
     return hdr + body
 
 

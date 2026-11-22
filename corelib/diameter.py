@@ -108,6 +108,41 @@ class DiameterError(Exception):
     pass
 
 
+def tbcd_encode(digits: str) -> bytes:
+    """Encode a TBCD digit string (TS 23.003 section 3.3): the first digit in
+    the low nibble, 0xF in the high nibble when the count is odd."""
+    if not digits or not digits.isdigit():
+        raise DiameterError("TBCD holds decimal digits only")
+    padded = digits if len(digits) % 2 == 0 else digits + "F"
+    return bytes(
+        (int(padded[index + 1], 16) << 4) | int(padded[index], 16)
+        for index in range(0, len(padded), 2))
+
+
+def tbcd_decode(value: bytes) -> str:
+    """Decode a TBCD digit string (TS 23.003 section 3.3). The first digit is
+    in the low nibble; an odd count ends with 0xF in the high nibble. Any other
+    semi-octet above 9 is refused instead of being read as a digit, because a
+    UTF-8 MSISDN would otherwise decode to a plausible but wrong number."""
+    digits: List[str] = []
+    for index, octet in enumerate(value):
+        low, high = octet & 0x0F, octet >> 4
+        if low > 9:
+            raise DiameterError(
+                f"TBCD octet {index} has no digit in its low nibble ({low:#x})")
+        digits.append(str(low))
+        if high == 0xF:
+            if index != len(value) - 1:
+                raise DiameterError(
+                    f"TBCD filler at octet {index}, not the last octet")
+            break
+        if high > 9:
+            raise DiameterError(
+                f"TBCD octet {index} has no digit in its high nibble ({high:#x})")
+        digits.append(str(high))
+    return "".join(digits)
+
+
 @dataclass
 class AVP:
     code: int
@@ -123,9 +158,14 @@ class AVP:
         if self.mandatory:
             flags |= AVP_FLAG_MANDATORY
         pad = b"\x00" * (-len(self.value) % 4)
-        # RFC 6733 4.1: the padding is not reflected in the AVP length.
+        # RFC 6733 4.1: AVP Code is four octets, then a one-octet Flags field,
+        # then a three-octet Length. The padding is not reflected in the length.
         length = 8 + (4 if self.vendor_id else 0) + len(self.value)
-        out = struct.pack("!II", (self.code << 8) | flags, length)
+        out = (
+            struct.pack("!I", self.code)
+            + struct.pack("!B", flags)
+            + length.to_bytes(3, "big")
+        )
         if self.vendor_id:
             out += struct.pack("!I", self.vendor_id)
         return out + self.value + pad
@@ -169,9 +209,10 @@ def decode_avps(payload: bytes) -> List[AVP]:
     avps: List[AVP] = []
     offset = 0
     while offset + 8 <= len(payload):
-        code_flags, length = struct.unpack("!II", payload[offset:offset + 8])
-        code = code_flags >> 8
-        flags = code_flags & 0xFF
+        # RFC 6733 4.1: four-octet code, one-octet flags, three-octet length.
+        code = struct.unpack("!I", payload[offset:offset + 4])[0]
+        flags = payload[offset + 4]
+        length = int.from_bytes(payload[offset + 5:offset + 8], "big")
         if length < 8 or offset + length > len(payload):
             break
         cursor = offset + 8

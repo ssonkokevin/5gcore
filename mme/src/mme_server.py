@@ -347,7 +347,8 @@ async def slg_plr_shim(request: SlgShimRequest) -> Dict[str, Any]:
     if request.subscriber:
         avps.append(d.AVP_UTF8(d.AVP_USER_NAME, request.subscriber))
     if request.msisdn:
-        avps.append(d.AVP_UTF8(d.AVP_MSISDN, request.msisdn))
+        avps.append(d.AVP(d.AVP_MSISDN, lcsap.tbcd(request.msisdn),
+                          vendor_id=d.VENDOR_3GPP))
     if request.horizontal_accuracy_m is not None:
         avps.append(d.AVP_GROUPED(
             d.AVP_LCS_QOS,

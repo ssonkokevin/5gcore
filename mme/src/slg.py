@@ -43,13 +43,18 @@ FULFILMENT_NOT_FULFILLED = 1
 
 
 def subscriber(request: d.Message) -> Optional[str]:
-    """User-Name carries the IMSI on SLg; MSISDN is the fallback identity."""
+    """User-Name carries the IMSI on SLg; MSISDN is the TBCD fallback identity
+    (AVP 701 is an OctetString of TS 23.003 semi-octets, TS 29.329 6.3.2)."""
     user = request.avp(d.AVP_USER_NAME)
     if user is not None and user.as_string():
         return user.as_string()
     msisdn = request.avp(d.AVP_MSISDN)
-    if msisdn is not None and msisdn.as_string():
-        return msisdn.as_string()
+    if msisdn is not None and msisdn.value:
+        if len(msisdn.value) > 8:
+            raise d.DiameterError(
+                f"MSISDN AVP is {len(msisdn.value)} octets; a TBCD E.164 "
+                "number is at most 8")
+        return d.tbcd_decode(msisdn.value)
     return None
 
 

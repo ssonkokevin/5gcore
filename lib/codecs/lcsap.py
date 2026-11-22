@@ -22,6 +22,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from corelib import diameter as _diameter
 from lib.codecs import lcsap_codec as _codec
 
 # pycrate's PDU object keeps the value it last decoded or encoded, so sharing
@@ -277,14 +278,12 @@ def decode_area(message: LcsApMessage) -> Optional[Circle]:
 
 
 def tbcd(digits: str) -> bytes:
-    """TS 23.003 semi-octets, low nibble first, 0xF filler when odd."""
-    if not digits.isdigit():
-        raise LcsApError("TBCD takes decimal digits only")
-    padded = digits if len(digits) % 2 == 0 else digits + "F"
-    out = bytearray()
-    for i in range(0, len(padded), 2):
-        out.append(int(padded[i + 1], 16) << 4 | int(padded[i], 16))
-    return bytes(out)
+    """TS 23.003 semi-octets, low nibble first, 0xF filler when odd. The codec
+    lives in corelib so the SLg MSISDN decoder and this encoder cannot drift."""
+    try:
+        return _diameter.tbcd_encode(digits)
+    except _diameter.DiameterError as exc:
+        raise LcsApError(str(exc)) from exc
 
 
 def plmn_identity(mcc: str, mnc: str) -> bytes:

@@ -180,16 +180,26 @@ class SlgAvps(unittest.TestCase):
     def test_subscriber_prefers_user_name(self):
         message = d.Message(command_code=d.CMD_PLR, app_id=d.APP_SLG, avps=[
             d.AVP_UTF8(d.AVP_USER_NAME, LAB_UE_A),
-            d.AVP_UTF8(d.AVP_MSISDN, "256700000001"),
+            d.AVP(d.AVP_MSISDN, lcsap.tbcd("256700000001"),
+                  vendor_id=d.VENDOR_3GPP),
         ])
         self.assertEqual(slg.subscriber(message), LAB_UE_A)
 
-    def test_subscriber_falls_back_to_msisdn(self):
+    def test_subscriber_falls_back_to_a_tbcd_msisdn(self):
         message = d.Message(command_code=d.CMD_PLR, app_id=d.APP_SLG, avps=[
-            d.AVP_UTF8(d.AVP_MSISDN, "256700000001")])
+            d.AVP(d.AVP_MSISDN, lcsap.tbcd("256700000001"),
+                  vendor_id=d.VENDOR_3GPP)])
         self.assertEqual(slg.subscriber(message), "256700000001")
         self.assertIsNone(slg.subscriber(d.Message(
             command_code=d.CMD_PLR, app_id=d.APP_SLG)))
+
+    def test_subscriber_refuses_a_msisdn_that_is_not_tbcd(self):
+        # A peer that writes the digits as text sends 12 octets, which no
+        # TBCD E.164 number can be. Reading it as TBCD would invent a number.
+        message = d.Message(command_code=d.CMD_PLR, app_id=d.APP_SLG, avps=[
+            d.AVP_UTF8(d.AVP_MSISDN, "256700000001")])
+        with self.assertRaises(d.DiameterError):
+            slg.subscriber(message)
 
     def test_accuracy_is_an_uncertainty_code(self):
         code = lcsap.uncertainty_code(50.0)

@@ -81,9 +81,9 @@ one is unrelated code and shares nothing.
 
 `dispatch_command` (`diameter/src/diameter_server.py:688`) knows only
 `S6A_HANDLERS` and `CX_HANDLERS`. There are no LIR/LIA, RIR/RIA, PLR/PLA,
-LRR/LRA or UDR/UDA handlers, and `APP_3GPP_Sh = 16777251` (`:57`) is the S6a
-application id, not Sh (16777217). Sh is not implemented despite the module
-docstring mentioning "SWx ... (Sh interface)".
+LRR/LRA or UDR/UDA handlers. `APP_3GPP_Sh` now imports `APP_SH` (16777217,
+TS 29.328 5.1) from `corelib.diameter`, but Sh itself is not implemented
+despite the module docstring mentioning "SWx ... (Sh interface)".
 
 The infrastructure that *is* reusable: AVP encode/decode, the message header
 builder, CER/CEA and DWR/DWA, and the socket loop.

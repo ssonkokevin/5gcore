@@ -47,11 +47,13 @@ SCCP_MSG_TYPE_UDT = 0x09  # Unit Data
 SCCP_MSG_TYPE_UDTS = 0x13  # Unit Data Service
 SCCP_MSG_TYPE_UDT_ERROR = 0x14
 
-SCCP_SSN_MAP = 6  # MAP Subsystem Number
+# SCCP subsystem numbers, TS 29.002 clause 20.4 (HLR 6, VLR 7, MSC 8,
+# SGSN 149, GMLC 145). A VLR or MSC is not the HLR's subsystem.
 SCCP_SSN_HLR = 6
-SCCP_SSN_VLR = 6
-SCCP_SSN_MSC = 6
-SCCP_SSN_SCP = 7
+SCCP_SSN_VLR = 7
+SCCP_SSN_MSC = 8
+SCCP_SSN_SGSN = 149
+SCCP_SSN_GMLC = 145
 
 # Global Title Indicator
 GTI_4 = 4  # TT + NP + ES + NAI + Translation Type + Encoding Scheme + Numbering Plan + Nature of Address
@@ -74,90 +76,29 @@ TCAP_P_TYPE_U = 0x64
 # MAP Operation Codes (TS 29.002)
 # ============================================================================
 
-MAP_OP_SRI = 21  # Send Routing Info
-MAP_OP_SAI = 22  # Send Authentication Info
-MAP_OP_ISD = 23  # Insert Subscriber Data
-MAP_OP_PUR = 24  # Purge MS
-MAP_OP_PROVIDE_ROAMING_NUMBER = 26  # Provide Roaming Number
-MAP_OP_PROVIDE_IMSI = 27  # Provide IMSI
-MAP_OP_AUTHENTICATION_FAILURE_REPORT = 32
-MAP_OP_REGISTER_SS = 47  # Register SS
-MAP_OP_ERASE_SS = 48  # Erase SS
-MAP_OP_ACTIVATE_SS = 49  # Activate SS
-MAP_OP_DEACTIVATE_SS = 50  # Deactivate SS
-MAP_OP_INTERROGATE_SS = 51  # Interrogate SS
-MAP_OP_REGISTER_PWD = 52  # Register Password
-MAP_OP_GET_PASSWORD = 53  # Get Password
-MAP_OP_PROCESS_UNSTRUCTURED_SS_REQUEST = 105  # Process Unstructured SS Request
-MAP_OP_UNSTRUCTURED_SS_NOTIFY = 106  # Unstructured SS Notify
-MAP_OP_PROVIDE_SUBSCRIBER_INFO = 107  # Provide Subscriber Info
-MAP_OP_NOTIFY_SS = 108  # Notify SS
-MAP_OP_ANY_TIME_INTERROGATION = 109  # Any Time Interrogation
-MAP_OP_SEND_INFO_FOR_OUTGOING_CALL = 110  # Send Info For Outgoing Call
-MAP_OP_SEND_ROUTING_INFO_FOR_SM = 111  # Send Routing Info For SM
-MAP_OP_SEND_INFO_FOR_MT_SM = 112  # Send Info For MT SM
-MAP_OP_SEND_INFO_FOR_MO_SM = 113  # Send Info For MO SM
-MAP_OP_READY_FOR_SM = 114  # Ready For SM
-MAP_OP_MT_FORWARD_SM = 115  # MT Forward SM
-MAP_OP_MO_FORWARD_SM = 116  # MO Forward SM
-MAP_OP_DELETE_MESSAGES = 117  # Delete Messages
-MAP_OP_ALERT_SERVICE_CENTRE = 118  # Alert Service Centre
-MAP_OP_INVOKE_MO_SM_FOR_SS = 119  # Invoke MO SM For SS
-MAP_OP_SEND_GROUP_CALL_INFO = 120  # Send Group Call Info
-MAP_OP_SEND_ROUTING_INFO_FOR_GROUP_CALL = 121  # Send Routing Info For Group Call
-MAP_OP_ANY_TIME_INTERROGATION_2 = 122  # Any Time Interrogation
-MAP_OP_NOTIFY_SS_2 = 123  # Notify SS
-MAP_OP_REGISTER_SS_2 = 124  # Register SS
-MAP_OP_ERASE_SS_2 = 125  # Erase SS
-MAP_OP_ACTIVATE_SS_2 = 126  # Activate SS
-MAP_OP_DEACTIVATE_SS_2 = 127  # Deactivate SS
-MAP_OP_INTERROGATE_SS_2 = 128  # Interrogate SS
-MAP_OP_REGISTER_PWD_2 = 129  # Register Password
-MAP_OP_GET_PASSWORD_2 = 130  # Get Password
-MAP_OP_PROCESS_UNSTRUCTURED_SS_REQUEST_2 = 131  # Process Unstructured SS Request
-MAP_OP_UNSTRUCTURED_SS_NOTIFY_2 = 132  # Unstructured SS Notify
-MAP_OP_PROVIDE_SUBSCRIBER_INFO_2 = 133  # Provide Subscriber Info
-MAP_OP_MO_FWD_SM_2 = 134  # MO Forward SM
-MAP_OP_MT_FWD_SM_2 = 135  # MT Forward SM
-MAP_OP_SEND_ROUTING_INFO_FOR_SM_2 = 136  # Send Routing Info For SM
-MAP_OP_PROVIDE_IMSI_2 = 137  # Provide IMSI
-MAP_OP_DELETE_MESSAGES_2 = 138  # Delete Messages
-MAP_OP_READY_FOR_SM_2 = 139  # Ready For SM
-MAP_OP_DELETE_SM_PP = 140  # Delete SM PP
-MAP_OP_SEND_ROUTING_INFO_FOR_SM_3 = 141  # Send Routing Info For SM
-MAP_OP_ATTACH_DETACH = 142  # Attach Detach
-MAP_OP_ANY_TIME_SUBSCRIPTION_INTERROGATION = 143  # Any Time Subscription Interrogation
-MAP_OP_ANY_TIME_SUBSCRIPTION_INTERROGATION_2 = 144
-MAP_OP_PROVIDE_SUBSCRIBER_INFO_3 = 145  # Provide Subscriber Info
-MAP_OP_PROCESS_UNSTRUCTURED_SS_REQUEST_3 = 146  # Process Unstructured SS Request
-MAP_OP_UNSTRUCTURED_SS_NOTIFY_3 = 147  # Unstructured SS Notify
-MAP_OP_MO_FWD_SM_3 = 148  # MO Forward SM
-MAP_OP_MT_FWD_SM_3 = 149  # MT Forward SM
-MAP_OP_SEND_ROUTING_INFO_FOR_SM_4 = 150  # Send Routing Info For SM
-MAP_OP_SEND_GROUP_CALL_INFO_2 = 151  # Send Group Call Info
-MAP_OP_SEND_ROUTING_INFO_FOR_GROUP_CALL_2 = 152  # Send Routing Info For Group Call
-MAP_OP_SEND_ROUTING_INFO_FOR_SM_5 = 153  # Send Routing Info For SM
-MAP_OP_PREPARE_HANDOVER = 154  # Prepare Handover
-MAP_OP_SEND_END_POINT = 155  # Send Endpoint
-MAP_OP_PREPARE_SUBSEQUENT_HANDOVER = 156  # Prepare Subsequent Handover
-MAP_OP_SEND_HANDOVER_REPORT = 157  # Send Handover Report
-MAP_OP_PROCESS_ACCESS_SIGNALLING = 158  # Process Access Signalling
-MAP_OP_PROCESS_ACCESS_SIGNALLING_2 = 159
-MAP_OP_FORWARD_ACCESS_SIGNALLING = 160  # Forward Access Signalling
-MAP_OP_FORWARD_ACCESS_SIGNALLING_2 = 161
-MAP_OP_SEND_PARAMETERS = 162  # Send Parameters
-MAP_OP_PROCESS_UNSTRUCTURED_SS_REQUEST_4 = 163  # Process Unstructured SS Request
-MAP_OP_UNSTRUCTURED_SS_NOTIFY_4 = 164  # Unstructured SS Notify
-MAP_OP_PROVIDE_SUBSCRIBER_INFO_4 = 165  # Provide Subscriber Info
-MAP_OP_MO_FWD_SM_4 = 166  # MO Forward SM
-MAP_OP_MT_FWD_SM_4 = 167  # MT Forward SM
-MAP_OP_SEND_ROUTING_INFO_FOR_SM_6 = 168  # Send Routing Info For SM
-MAP_OP_PROCESS_UNSTRUCTURED_SS_REQUEST_5 = 169  # Process Unstructured SS Request
-MAP_OP_UNSTRUCTURED_SS_NOTIFY_5 = 170  # Unstructured SS Notify
-MAP_OP_PROVIDE_SUBSCRIBER_INFO_5 = 171  # Provide Subscriber Info
-MAP_OP_MO_FWD_SM_5 = 172  # MO Forward SM
-MAP_OP_MT_FWD_SM_5 = 173  # MT Forward SM
-MAP_OP_SEND_ROUTING_INFO_FOR_SM_7 = 174  # Send Routing Info For SM
+# MAP operation codes, TS 29.002 clause 25.1. Only the operations this server
+# answers are defined; invented duplicates of an operation with another code
+# are worse than absent, because a peer answers on the wrong operation.
+MAP_OP_SEND_ROUTING_INFO_FOR_SM = 45
+MAP_OP_SEND_AUTHENTICATION_INFO = 56
+MAP_OP_INSERT_SUBSCRIBER_DATA = 7
+MAP_OP_PROVIDE_ROAMING_NUMBER = 4
+MAP_OP_REGISTER_SS = 10
+MAP_OP_ERASE_SS = 11
+MAP_OP_ACTIVATE_SS = 12
+MAP_OP_DEACTIVATE_SS = 13
+MAP_OP_INTERROGATE_SS = 14
+MAP_OP_PROCESS_UNSTRUCTURED_SS_REQUEST = 59
+MAP_OP_PROVIDE_SUBSCRIBER_INFO = 70
+MAP_OP_ANY_TIME_INTERROGATION = 71
+MAP_OP_PROVIDE_SUBSCRIBER_LOCATION = 83
+MAP_OP_SEND_ROUTING_INFO_FOR_LCS = 85
+MAP_OP_LOCATION_REPORT = 86
+
+# The existing handler names keep their message-level names; these aliases make
+# the operation each one answers unambiguous at the call site.
+MAP_OP_SAI = MAP_OP_SEND_AUTHENTICATION_INFO
+MAP_OP_ISD = MAP_OP_INSERT_SUBSCRIBER_DATA
 
 # MAP Error Codes
 MAP_ERR_UNKNOWN_SUBSCRIBER = 2
@@ -798,7 +739,7 @@ def handle_any_time_interrogation(parameters: bytes, invoke_id: int) -> bytes:
 
 
 def handle_psl(parameters: bytes, invoke_id: int) -> bytes:
-    """Provide Subscriber Location (MAP_OP_PROVIDE_SUBSCRIBER_INFO with PSL)."""
+    """Provide Subscriber Location (MAP_OP_PROVIDE_SUBSCRIBER_LOCATION, 83)."""
     imsi = None
     
     conn = get_db()
@@ -814,7 +755,7 @@ def handle_psl(parameters: bytes, invoke_id: int) -> bytes:
         conn.close()
     
     if not imsi:
-        return encode_tcap_response(invoke_id, MAP_OP_PROVIDE_SUBSCRIBER_INFO, b"", error_code=MAP_ERR_UNKNOWN_SUBSCRIBER)
+        return encode_tcap_response(invoke_id, MAP_OP_PROVIDE_SUBSCRIBER_LOCATION, b"", error_code=MAP_ERR_UNKNOWN_SUBSCRIBER)
     
     # Build location info response
     result_params = b"".join([
@@ -823,7 +764,7 @@ def handle_psl(parameters: bytes, invoke_id: int) -> bytes:
         bytes([0x04, 0x04]) + b"LAC-01",  # Location Area Code
     ])
     
-    return encode_tcap_response(invoke_id, MAP_OP_PROVIDE_SUBSCRIBER_INFO, result_params)
+    return encode_tcap_response(invoke_id, MAP_OP_PROVIDE_SUBSCRIBER_LOCATION, result_params)
 
 
 def handle_tcsi(parameters: bytes, invoke_id: int) -> bytes:
@@ -860,7 +801,7 @@ MAP_HANDLERS = {
     MAP_OP_REGISTER_SS: handle_register_ss,
     MAP_OP_ERASE_SS: handle_erase_ss,
     MAP_OP_ANY_TIME_INTERROGATION: handle_any_time_interrogation,
-    MAP_OP_PROVIDE_SUBSCRIBER_INFO: handle_psl,
+    MAP_OP_PROVIDE_SUBSCRIBER_LOCATION: handle_psl,
 }
 
 
@@ -928,7 +869,7 @@ class SCCPServer:
         called_ssn = called_addr.get("ssn", 0)
         calling_ssn = calling_addr.get("ssn", 0)
         
-        if called_ssn == SCCP_SSN_MAP or calling_ssn == SCCP_SSN_MAP:
+        if called_ssn == SCCP_SSN_HLR or calling_ssn == SCCP_SSN_HLR:
             self.process_map(sccp_data, called_addr, calling_addr, writer)
 
     def process_map(self, tcap_data: bytes, called: Dict, calling: Dict, writer: asyncio.StreamWriter):
@@ -957,12 +898,12 @@ class SCCPServer:
         # Build SCCP UDT with reversed addresses
         called_bytes = encode_pc_address(
             0,  # No PC for now
-            called.get("ssn", SCCP_SSN_MAP),
+            called.get("ssn", SCCP_SSN_HLR),
             called.get("global_title")
         )
         calling_bytes = encode_pc_address(
             0,
-            calling.get("ssn", SCCP_SSN_MAP),
+            calling.get("ssn", SCCP_SSN_HLR),
             calling.get("global_title")
         )
         

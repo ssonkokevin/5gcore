@@ -31,6 +31,7 @@ for _path in (_APP_DIR, _SRC_DIR):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
+from corelib.diameter import APP_S6A, APP_SH  # noqa: E402
 from corelib.milenage import (  # noqa: E402
     CryptoUnavailable,
     Milenage,
@@ -65,9 +66,9 @@ CMD_PP = 304  # Push Profile (Cx)
 CMD_RT = 305  # Registration Termination (Cx)
 
 # Application IDs
-APP_3GPP_S6a = 16777251  # S6a
-APP_3GPP_Cx = 16777216   # Cx
-APP_3GPP_Sh = 16777251   # Sh (same as S6a app ID)
+APP_3GPP_S6a = APP_S6A
+APP_3GPP_Cx = 16777216   # Cx (TS 29.228 6.1.1)
+APP_3GPP_Sh = APP_SH    # Sh (TS 29.328 5.1), not the S6a value
 
 # AVP Codes (subset)
 AVP_ORIGIN_HOST = 264
@@ -203,16 +204,20 @@ RESULT_DIAMETER_ROAMING_NOT_ALLOWED = 5032
 def encode_avp(code: int, flags: int, vendor_id: int, data: bytes) -> bytes:
     """Encode a Diameter AVP (RFC 6733 §4.1).
 
-    The V bit (0x80) adds the four-octet Vendor-Id field, so the declared
-    length must include it.
+    AVP Code is four octets, Flags one, Length three. The V bit (0x80) adds the
+    four-octet Vendor-Id and counts in the length; padding brings the next AVP
+    to a four-octet boundary but is not counted.
     """
     has_vendor = bool(flags & 0x80)
     avp_len = (12 if has_vendor else 8) + len(data)
-    header = struct.pack("!I", (code << 8) | flags)
-    header += struct.pack("!I", avp_len)
+    header = (
+        struct.pack("!I", code)
+        + struct.pack("!B", flags)
+        + avp_len.to_bytes(3, "big")
+    )
     if has_vendor:
         header += struct.pack("!I", vendor_id)
-    return header + data
+    return header + data + b"\x00" * (-len(data) % 4)
 
 
 def encode_uint32_avp(code: int, value: int, vendor_id: int = 0, mandatory: bool = True) -> bytes:
@@ -237,18 +242,15 @@ def encode_grouped_avp(code: int, sub_avps: bytes, vendor_id: int = 0, mandatory
 
 def decode_avp(data: bytes, offset: int = 0) -> Tuple[int, int, int, int, bytes]:
     """Decode a Diameter AVP. Returns (code, flags, length, vendor_id, data, next_offset)."""
-    avp_code = struct.unpack("!I", data[offset:offset+4])[0]
-    code = avp_code >> 8
-    flags = avp_code & 0xFF
-    avp_len = struct.unpack("!I", data[offset+4:offset+8])[0]
-    vendor_id = struct.unpack("!I", data[offset+8:offset+12])[0] if (flags & 0x80) else 0
-    
-    # V bit: bit 7 of flags byte 0 = 0x80
+    code = struct.unpack("!I", data[offset:offset+4])[0]
+    flags = data[offset+4]
+    avp_len = int.from_bytes(data[offset+5:offset+8], "big")
     has_vendor = bool(flags & 0x80)
+    vendor_id = struct.unpack("!I", data[offset+8:offset+12])[0] if has_vendor else 0
     base_len = 12 if has_vendor else 8
-    
     avp_data = data[offset+base_len:offset+avp_len]
-    next_offset = offset + avp_len
+    # The next AVP starts on a four-octet boundary; padding is outside the length.
+    next_offset = offset + ((avp_len + 3) & ~3)
     return code, flags, avp_len, vendor_id, avp_data, next_offset
 
 

@@ -81,6 +81,7 @@ import diameter_server as s6a  # noqa: E402
 sys.path.insert(0, str(ROOT / "map_sccp" / "src"))
 import map_sccp_server as map_sccp  # noqa: E402
 
+from corelib import diameter as d  # noqa: E402
 from corelib.milenage import Milenage  # noqa: E402
 
 IMSI = "001010000000001"
@@ -309,6 +310,60 @@ class DiameterWireTest(unittest.TestCase):
         finally:
             server.close()
             await server.wait_closed()
+
+
+class SignallingConstants(unittest.TestCase):
+    """The numbers a peer reads back. Each comes from a TS 29.002 table, and
+    fixtures/constants.json enforces the same values on the Java side."""
+
+    def test_application_ids_come_from_one_source(self):
+        self.assertEqual(s6a.APP_3GPP_S6a, d.APP_S6A)
+        self.assertEqual(s6a.APP_3GPP_Sh, d.APP_SH)
+        self.assertEqual(s6a.APP_3GPP_Sh, 16777217)
+
+    def test_sccp_subsystem_numbers_match_ts_29_002(self):
+        expected = {
+            "SCCP_SSN_HLR": 6,
+            "SCCP_SSN_VLR": 7,
+            "SCCP_SSN_MSC": 8,
+            "SCCP_SSN_SGSN": 149,
+            "SCCP_SSN_GMLC": 145,
+        }
+        self.assertEqual(
+            {name: getattr(map_sccp, name) for name in expected}, expected)
+
+    def test_map_opcodes_match_ts_29_002(self):
+        expected = {
+            "MAP_OP_SEND_ROUTING_INFO_FOR_SM": 45,
+            "MAP_OP_SEND_AUTHENTICATION_INFO": 56,
+            "MAP_OP_INSERT_SUBSCRIBER_DATA": 7,
+            "MAP_OP_PROVIDE_ROAMING_NUMBER": 4,
+            "MAP_OP_REGISTER_SS": 10,
+            "MAP_OP_ERASE_SS": 11,
+            "MAP_OP_ACTIVATE_SS": 12,
+            "MAP_OP_DEACTIVATE_SS": 13,
+            "MAP_OP_INTERROGATE_SS": 14,
+            "MAP_OP_PROCESS_UNSTRUCTURED_SS_REQUEST": 59,
+            "MAP_OP_PROVIDE_SUBSCRIBER_INFO": 70,
+            "MAP_OP_ANY_TIME_INTERROGATION": 71,
+            "MAP_OP_PROVIDE_SUBSCRIBER_LOCATION": 83,
+            "MAP_OP_SEND_ROUTING_INFO_FOR_LCS": 85,
+            "MAP_OP_LOCATION_REPORT": 86,
+        }
+        self.assertEqual(
+            {name: getattr(map_sccp, name) for name in expected}, expected)
+        self.assertEqual(map_sccp.MAP_OP_SAI, map_sccp.MAP_OP_SEND_AUTHENTICATION_INFO)
+        self.assertEqual(map_sccp.MAP_OP_ISD, map_sccp.MAP_OP_INSERT_SUBSCRIBER_DATA)
+
+    def test_psl_is_answered_on_the_psl_opcode(self):
+        self.assertIs(
+            map_sccp.MAP_HANDLERS[map_sccp.MAP_OP_PROVIDE_SUBSCRIBER_LOCATION],
+            map_sccp.handle_psl)
+        STORE[IMSI] = subscriber()
+        response = map_sccp.handle_psl(map_sccp.encode_imsi(IMSI), invoke_id=7)
+        self.assertIn(
+            bytes([0x02, 0x01, map_sccp.MAP_OP_PROVIDE_SUBSCRIBER_LOCATION]),
+            response)
 
 
 if __name__ == "__main__":
